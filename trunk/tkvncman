@@ -3,12 +3,12 @@
 use Data::Dumper;
 use POSIX qw/:sys_wait_h/;
 use Tk;
-require Tk::Adjuster;
-require Tk::DialogBox;
-require Tk::LabEntry;
-require Tk::MsgBox;
+use Tk::JPEG;
+use MIME::Base64;
 use Time::HiRes qw/gettimeofday/;
 use File::Temp qw/tempfile/;
+use IPC::Open3;
+use Symbol qw/gensym/;
 
 $sess_dir = $ENV{'HOME'}."/.vnc/sessions/";
 $Loaded = undef;
@@ -19,12 +19,14 @@ $OutputTextModifyLock = 0;
 
 
 $mw = new MainWindow( -title=>"tkVNCman" );
-$mw->geometry('500x300');
+$mw->geometry("500x300");
 
 $lf = $mw->Frame;
 $aj = $mw->Adjuster( -widget=>$lf, -side=>'left' );
 $rf = $mw->Frame;
 $lb = $rf->Label( -text=>"Select a VNC session!", -foreground=>"darkgreen" );
+$ba = $mw->Balloon(-background=>"lightyellow");
+$ba->attach($lb, -initwait=>300, -balloonposition=>'mouse', -balloonmsg=>"Click to Rename");
 
 $mb = $mw->Menu();
 eval q{
@@ -39,7 +41,14 @@ or $no_watch=1;
 if($no_watch) {
 	$lf->Button( -text=>"Refresh", -height=>1, -command=>\&sess_load )->pack(qw/-side bottom -fill x -expand 0/);
 }
-$mb->command( -label=>"~Connect", -command=>sub{ StartSession($OutputText->Contents()); } );
+
+$mb->command( -label=>"~Connect", -command=>sub{ StartSession($OutputText->Contents(), 1); } );
+if(system("which vncsnapshot")==0) {
+	$mb->command( -label=>"S~napshot", -command=>sub{ StartSession($OutputText->Contents(), 'vncsnapshot'); } );
+} else {
+	print STDERR "No vncsnapshot.";
+}
+
 $btnSave = $mb->command( -label=>"~Save", -command=>\&sess_save );
 $mb->command( -label=>"~New", -command=>sub{
 	$Loaded = "Unsaved Session";
@@ -49,7 +58,7 @@ $mb->command( -label=>"~New", -command=>sub{
 	$OutputText->focus();
     } );
 $mb->separator();
-$mb->command( -label=>"~Exit", -foreground=>"darkred", -activebackground=>"darkred", -activeforeground=>"white", -command=>\&mori );
+$mb->command( -label=>"E~xit", -foreground=>"darkred", -activebackground=>"darkred", -activeforeground=>"white", -command=>\&mori );
 $mw->configure( -menu=>$mb );
 
 
@@ -82,17 +91,27 @@ $DelMsgBox = $mw->MsgBox(
 	-type=>'yesno', 
 	-default=>'no'
 	);
+$ErrMsgBox = $mw->MsgBox(
+	-title=>"Error", 
+	-icon=>'error', 
+	-type=>'ok', 
+	);
 
 
 
 
 sub sess_load {
 	$ListBox->delete(0, 'end');
-	if(! -e $sess_dir) { mkdir $sess_dir; }
+	my @d = split/\/+/, $sess_dir;
+	for(1..$#d) {
+		my $d = join '/', @d[0..$_];
+		if(! -e $d) { mkdir $d; }
+	}
 	opendir DIR, $sess_dir;
 	$ListBox->insert('end', sort {$a cmp $b} map { s/\.vnc$//i; $_ } grep { -f "$sess_dir/$_" and /\.vnc$/i } readdir DIR);
 	close DIR;
 }
+
 sess_load();
 sub sess_save {
 	if(defined $Loaded) {
@@ -103,12 +122,11 @@ sub sess_save {
 }
 
 
-sub StartSession {
-	my (%opt, $host, $port);
-	my ($tmpfh, $tmpfile);
+sub ini_parse {
+	my ($host, $port, $passhash, %opt);
 	for(split /[\r\n]+/, $_[0]) {
 		s/\s*$//;
-		($_, $val) = (/^\s*(\S+)\s*=\s*(.*)/);
+		my ($_, $val) = (/^\s*(\S+)\s*=\s*(.*)/);
 		$_ = lc $_;
 		if(/^host|port$/i) { eval "\$$_ = \$val"; }
 		elsif(/^Preferred_?Encoding|FullScreen|Shared|MenuKey|DotWhenNoCursor|UseLocalCursor|Log|FullColou?r$/) {
@@ -118,29 +136,126 @@ sub StartSession {
 		elsif(/^ClientCutText$/) { $opt{'SendClipboard'}=$opt{'SendPrimary'}=$val; }
 		elsif(/^ServerCutText$/) { $opt{'AcceptClipboard'}=$val; }
 		elsif(/^Colou?r_?Level$/) { $opt{'LowColourLevel'}=$ColourLevel{$val}; }
-		elsif(/^password$/ and length($val)) {
-			($tmpfh, $tmpfile) = tempfile();
-			$val =~ s/(..)/chr hex $1/g;
-			print $tmpfh $val;
-			close $tmpfh;
-			$opt{'PasswordFile'}=$tmpfile;
-		}
+		elsif(/^password$/ and length($val)) { $passhash = $val; }
 	}
+	return $host, $port, $passhash, %opt;
+}
+
+sub vncsnapshot {
+	my ($host, %opt) = @_;
+	
+	my ($tmpfh, $tmpfile);
+	if(not defined $opt{'PasswordFile'}) {
+		($tmpfh, $tmpfile) = tempfile();
+		close $tmpfh;
+		$opt{'PasswordFile'}=$tmpfile;
+	}
+	my @args = ('vncsnapshot', '-passwd', $opt{'PasswordFile'}, '-cursor', $host, "/dev/stdout");
+	local $, = ' ';
+	print @args, "\n";
+	
+	my($img, $errstr);
+	my $imgfd = gensym;
+	my $errfd = gensym;
+	my $pid = open3('/dev/zero', $imgfd, $errfd, @args);
+	$img .= $_ while <$imgfd>;
+	$errstr .= $_ while <$errfd>;
+	waitpid $pid, 0;
+	$vncsnapshot = $?>>8;
+	
+	unlink $opt{'PasswordFile'} or warn $opt{'PasswordFile'}.": $!";
+	
+	if($vncsnapshot!=0) {
+		$ErrMsgBox->configure( -message=>"vncsnapshot error", -detail=>"$errstr\n(exit code $vncsnapshot)" );
+		$ErrMsgBox->Show();
+	}
+	return($img, $vncsnapshot);
+}
+
+sub StartSession {
+	my (%opt, $host, $port, $passhash);
+	($host, $port, $password, %opt) = ini_parse($_[0]);
 	if(not $host) { return 0; }
 	if($port) { $host .= "::$port"; }
+	my ($tmpfh, $tmpfile);
+	if(defined $passhash) {
+		($tmpfh, $tmpfile) = tempfile();
+		$passhash =~ s/(..)/chr hex $1/g;
+		print $tmpfh $passhash;
+		close $tmpfh;
+		$opt{'PasswordFile'}=$tmpfile;
+	}
 	
-	my $fork = fork;
-	if($fork==0) {
-		my @args = ('xvncviewer', $host, map {'-'.$_.'='.$opt{$_}} keys %opt);
-		local $, = ' ';
-		print @args;
-		open STDIN, '/dev/zero';
-		exec @args;
+	if($_[1] eq 'vncsnapshot') {
+		my ($img, $vncsnapshot) = vncsnapshot($host, %opt);
+		return $vncsnapshot if $vncsnapshot!=0;
+		
+		my $top = $mw->Toplevel( -title=>"snapshot on [$host] at ".scalar(localtime) );
+		$top->geometry("640x480");
+		my $k = $top->Scrolled('Frame', -scrollbars=>'osoe')->pack(-expand=>1, -fill=>'both')
+		 ->Label( -image=>$top->Photo(-data=>encode_base64($img), -format=>'jpeg') );
+		undef $img;
+		$k->pack( -expand=>1, -fill=>'both' );
+
+		$top->bind('<Escape>'=>sub { $top->destroy; });
+		$top->bind('<q>'=>sub { $top->destroy; });
+		$k->bind('<Button-3>'=>[sub {
+			my($w, $x, $y) = @_;
+			my $ctxmenu;
+			for($w->children) {
+				if($_->class eq 'Menu') {
+					$_->unpost;
+					$ctxmenu = $_;
+				}
+			}
+			if(not defined $ctxmenu) {
+			    $ctxmenu = $w->Menu( -tearoff=>0, -menuitems=>[
+			    	[Button=>"Refresh", -command=>sub {
+			    		my ($img, $vncsnapshot) = vncsnapshot($host, %opt);
+			    		if($vncsnapshot==0) {
+						$top->configure( -title=>"snapshot on [$host] at ".scalar(localtime) );
+						$k->configure( -image=>$top->Photo(-data=>encode_base64($img), -format=>'jpeg') );
+					}
+			    	}],
+				[Button=>"Save", -command=>sub {
+					my $file = $top->getSaveFile(-defaultextension=>".jpg", -initialfile=>"vncsnapshot.jpg", -title=>"Save image");
+					if(defined $file) {
+						my $img = decode_base64( $k->cget('-image')->cget('-data') );
+						open my $imgfd, '>', $file or goto FAILED;
+						print $imgfd $img or goto FAILED;
+						close $imgfd or goto FAILED;
+						return 1;
+						FAILED:
+						$ErrMsgBox->configure( -message=>"Save file error", -detail=>$! );
+						$ErrMsgBox->Show();
+					}
+				}],
+				[Separator=>1],
+				[Button=>"Close", -command=>sub {$top->destroy;}]
+			    ]);
+			}
+			$ctxmenu->post($x, $y);
+		}, Ev('X'), Ev('Y')]);
+		$k->bind('<Button-1>'=>[sub {
+			my $w = shift;
+			$_->class eq 'Menu' and $_->unpost for $w->children;
+		}]);
 	}
 	else {
-		push @Forks, {'pid'=>$fork, 'file'=>$tmpfile};
+		my $fork = fork;
+		if($fork==0) {
+			my @args = ('xvncviewer', $host, map {'-'.$_.'='.$opt{$_}} keys %opt);
+			local $, = ' ';
+			print @args, "\n";
+			open STDIN, '/dev/zero';
+			exec @args;
+		}
+		else {
+			push @Forks, {'pid'=>$fork, 'file'=>$tmpfile};
+		}
 	}
 }
+
 sub SaveSession {
 	$_[1] =~ s/\n$//;
 	$_[1] =~ s/\n/\r\n/g;
@@ -153,7 +268,7 @@ sub SelSession {
 	my $filename = $ListBox->get($index);
 	my $now = scalar gettimeofday;
 	if($Click{$filename} > $now-1.2 and $Loaded eq $filename) {
-		return StartSession($OutputText->Contents());
+		return StartSession($OutputText->Contents(), 1);
 	}
 	$Click{$filename} = $now;
 	LoadSession($filename);
@@ -243,6 +358,7 @@ sub mori {
 	exit;
 }
 $SIG{'INT'} = $SIG{'QUIT'} = $SIG{'TERM'} = \&mori;
+
 
 
 MainLoop;
