@@ -10,19 +10,37 @@ use File::Temp qw/tempfile/;
 use IPC::Open3;
 use Symbol qw/gensym/;
 use Crypt::DES;
+use Storable;
 
 $Crypter = new Crypt::DES(pack("H16", "E84AD660C4721AE0"));
 $sess_dir = $ENV{'HOME'}."/.vnc/sessions/";
+$pref_file = $ENV{'HOME'}."/.vnc/tkvncmanrc";
 $Loaded = undef;
 $Unsaved = $textarea1_modlock = $replacer_lock = 0;
 $vnchost, $vncport, $vncpass_hash, %vncopt;
 %ColourLevel = qw/rgb111 0 rgb222 1 pal8 2/;
 $str_unsaved = "Unsaved Session";
+$Pref = (-f $pref_file) ? retrieve($pref_file) : {};
+%Pref = %$Pref;
 
+
+
+while(scalar @ARGV) {
+	if($ARGV[0] eq '-d') {
+		shift @ARGV;
+		if(-d $ARGV[0]) {
+			$sess_dir = $ARGV[0];
+		} else {
+			warn "$ARGV[0]: not a directory";
+		}
+	}
+	shift @ARGV;
+}
 
 
 $window1 = new MainWindow( -title=>"tkVNCman" );
-$window1->geometry("500x300");
+($window1_w, $window1_h) = (560, 336);
+$window1->geometry(sprintf "%dx%d+%d+%d", $window1_w, $window1_h, int($window1->screenwidth/2-$window1_w/2), int($window1->screenheight/2-$window1_h/2));
 
 $frame1 = $window1->Frame();
 $adjuster1 = $window1->Adjuster( -widget=>$frame1, -side=>'left' );
@@ -76,16 +94,16 @@ $listbox1 = $frame1->Scrolled(
 );
 $textarea1 = $frame2->Scrolled(
 	'Text',
+	-scrollbars=>'osoe',
 	-height=>'1',
 	-width=>'1',
-	-scrollbars=>'osoe',
 	-wrap=>'no',
 );
 $frame3 = $frame2->Frame(
 	-relief=>'sunken',
-	-width=>1
+	-height=>'1',
+	-width=>'1',
 );
-$frame4 = $frame2->Frame();
 
 $frame3->Label( -text=>"Host" )
 	->grid(qw/-row 0 -column 0 -sticky nw/);
@@ -111,7 +129,7 @@ $inputbox2 = $frame3->Entry( -textvariable=>\$vncpass, -show=>'*', -width=>16,
 	}, -validate=>'key' )
 	->grid(qw/-row 2 -column 1 -sticky nw/);
 $button2 = 
-$frame3->Button( -width=>16, -height=>15, 
+  $frame3->Button( -width=>16, -height=>15, 
 	-command=>sub {
 		$inputbox2->configure( -show=> defined $inputbox2->cget('-show') ? undef : '*' );
 	},
@@ -155,6 +173,11 @@ for my $lbl (qw/FullScreen Shared ViewOnly/) {
 		-command=>sub { replacer($lbl, $vncopt{lc $lbl}) },
 	)->grid(-row=>$row, -column=>0, -sticky=>'nw', -columnspan=>2);
 }
+
+
+$frame4 = $frame2->Frame();
+$button3 = 
+  $frame4->Button(-text=>"Basic <<", -command=>\&toggle_adv_bas)->pack(qw/-side bottom -anchor s -side right/);
 
 
 $dialog1 = $window1->DialogBox( 
@@ -213,7 +236,26 @@ sub parse_textarea {
 		elsif(/^password$/i && $val=~/^[[:xdigit:]]{16}$/i) { $vncpass_hash = $val; $vncpass = pass_dec($val); }
 	}
 	$replacer_lock = 0;
-	print Dumper \%vncopt;
+}
+
+
+sub toggle_adv_bas {
+	# TODO: nobody knows where is the window (+x+y offset)
+	my @geometry = ($window1->geometry =~ /(\d+)x(\d+.*)/);
+	if(eval q{$textarea1->packInfo;1;}) {
+		$textarea1_width = $textarea1->width;
+		$textarea1->packForget;
+		$window1->geometry($geometry[0] - $textarea1_width . 'x' . $geometry[1]);
+		Pref('ini_editor', 0);
+	}
+	else {
+		$window1->geometry($geometry[0] + ($textarea1_width||220) . 'x' . $geometry[1]);
+		$textarea1->pack(qw/-side right -fill both -expand 1 -after/, $label1);
+		$button3->configure(-text=>"Advanced >>");
+		$button3->configure(-text=>"Basic <<");
+		Pref('ini_editor', 1);
+	}
+	btn3text();
 }
 
 sub vncsnapshot {
@@ -440,6 +482,11 @@ sub SessDel {
 	}
 }
 
+sub Pref {
+	$Pref{$_[0]} = $_[1];
+	store \%Pref, $pref_file;
+}
+
 
 $window1->bind('<Escape>' => \&mori);
 $window1->bind('<Control-q>' => \&mori);
@@ -471,10 +518,21 @@ $listbox1->pack(qw/-side top -fill both -expand 1/);
 $adjuster1->pack(qw/-side left -fill y/);
 $frame2->pack(qw/-side bottom -fill both -expand 1/);
 $label1->pack(qw/-side top -fill x -expand 0 -pady 3 -padx 3/);
-$textarea1->pack(qw/-side right -fill both -expand 1/);
+if($Pref{'ini_editor'}) {
+	$textarea1->pack(qw/-side right -fill both -expand 1/);
+}
 $frame3->pack(qw/-side top -fill both -expand 0/);
 $frame4->pack(qw/-side bottom -fill both -expand 1/);
 
+
+sub btn3text {
+	if(eval q{$textarea1->packInfo;1;}) {
+		$button3->configure(-text=>"Basic <<");
+	} else {
+		$button3->configure(-text=>"Advanced >>");
+	}
+}
+btn3text();
 
 
 sub bury {
@@ -499,7 +557,7 @@ sub mori {
 			close_toplevel($_);
 		}
 	}
-	exit;
+	$window1->after(10, sub{exit;});
 }
 $SIG{'INT'} = $SIG{'QUIT'} = $SIG{'TERM'} = \&mori;
 sub close_toplevel {
