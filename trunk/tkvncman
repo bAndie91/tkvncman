@@ -39,8 +39,6 @@ while(scalar @ARGV) {
 
 
 $window1 = new MainWindow( -title=>"tkVNCman" );
-($window1_w, $window1_h) = (560, 336);
-$window1->geometry(sprintf "%dx%d+%d+%d", $window1_w, $window1_h, int($window1->screenwidth/2-$window1_w/2), int($window1->screenheight/2-$window1_h/2));
 
 $frame1 = $window1->Frame();
 $adjuster1 = $window1->Adjuster( -widget=>$frame1, -side=>'left' );
@@ -48,8 +46,6 @@ $frame2 = $window1->Frame();
 $label1 = $frame2->Label( -text=>"Select a VNC session!", -foreground=>"darkgreen", -background=>"white", -relief=>'groove' );
 $tooltip1 = $label1->Balloon(-background=>"lightyellow");
 $tooltip1->attach($label1, -initwait=>300, -balloonposition=>'mouse', -balloonmsg=>"Click to Rename");
-$tooltip2 = $frame1->Balloon(-background=>"lightyellow");
-$tooltip2->attach($frame1, -initwait=>300, -balloonposition=>'mouse', -balloonmsg=>"Left click: select\nRight click: delete");
 
 $menubar1 = $window1->Menu();
 eval q{
@@ -73,13 +69,7 @@ if(system("which vncsnapshot")==0) {
 }
 
 $menuitem3 = $menubar1->command( -label=>"~Save", -command=>\&SessSave );
-$menubar1->command( -label=>"~New", -command=>sub{
-	$Loaded = $str_unsaved;
-	$label1->configure( -text=>$Loaded, -foreground=>"black" );
-	$textarea1->Contents("host=\nport=\n");
-	$textarea1->SetCursor('1.5');
-	$textarea1->focus();
-    });
+$menubar1->command( -label=>"~New", -command=>\&SessNew );
 $menubar1->separator();
 $menubar1->command( -label=>"E~xit", -foreground=>"darkred", -activebackground=>"darkred", -activeforeground=>"white", -command=>\&mori );
 $window1->configure( -menu=>$menubar1 );
@@ -92,11 +82,16 @@ $listbox1 = $frame1->Scrolled(
 	-scrollbars=>'e',
 	-selectmode=>'single',
 );
+$menubar3 = $listbox1->Menu( -tearoff=>0, -menuitems=>[
+	[Button => "Copy", -command => sub { `cp '$sess_dir/$Loaded.vnc' '$sess_dir/Copy of $Loaded.vnc'`; }],
+	[Button => "Delete", -command => \&SessDel],
+]);
+
 $textarea1 = $frame2->Scrolled(
 	'Text',
 	-scrollbars=>'osoe',
-	-height=>'1',
-	-width=>'1',
+	-height=>1,
+	-width=>1,
 	-wrap=>'no',
 );
 $frame3 = $frame2->Frame(
@@ -112,15 +107,20 @@ $frame3->Entry( -textvariable=>\$vnchost,
 		replacer('host', $_[0]);
 	}, -validate=>'key' )
 	->grid(qw/-row 0 -column 1 -sticky nw -columnspan 2/);
+
 $frame3->Label( -text=>"Port" )
 	->grid(qw/-row 1 -column 0 -sticky nw/);
-$frame3->Entry( -textvariable=>\$vncport, 
+$inputbox3 =
+  $frame3->Entry( -textvariable=>\$vncport, 
 	-vcmd=>sub{
 		$_=shift;
 		return replacer('port', $_) if /^\d*$/ and $_<65536;
 		return 0
 	}, -validate=>'key' )
 	->grid(qw/-row 1 -column 1 -sticky nw -columnspan 2/);
+$inputbox3->bind('<Up>'  =>  sub{$vncport<65536 and $vncport++});
+$inputbox3->bind('<Down>' => sub{$vncport>0 and $vncport--});
+
 $frame3->Label( -text=>"Password" )
 	->grid(qw/-row 2 -column 0 -sticky nw/);
 $inputbox2 = $frame3->Entry( -textvariable=>\$vncpass, -show=>'*', -width=>16,
@@ -240,22 +240,29 @@ sub parse_textarea {
 
 
 sub toggle_adv_bas {
-	# TODO: nobody knows where is the window (+x+y offset)
-	my @geometry = ($window1->geometry =~ /(\d+)x(\d+.*)/);
+	my $w_delta;
 	if(eval q{$textarea1->packInfo;1;}) {
-		$textarea1_width = $textarea1->width;
+		$w_delta = $textarea1->width;
+		$w_delta = -($w_delta<=1 ? 220 : $w_delta);
 		$textarea1->packForget;
-		$window1->geometry($geometry[0] - $textarea1_width . 'x' . $geometry[1]);
 		Pref('ini_editor', 0);
 	}
 	else {
-		$window1->geometry($geometry[0] + ($textarea1_width||220) . 'x' . $geometry[1]);
+		$w_delta = $textarea1_width<=1 ? 220 : $textarea1_width;
 		$textarea1->pack(qw/-side right -fill both -expand 1 -after/, $label1);
-		$button3->configure(-text=>"Advanced >>");
-		$button3->configure(-text=>"Basic <<");
 		Pref('ini_editor', 1);
 	}
+	my $geometry = $window1->geometry;
+	$geometry =~ s/(\d+)/$1+$w_delta/e;
+	resize($geometry);
 	btn3text();
+}
+sub resize {
+	# damn workaround
+	if($window1->geometry ne $_[0]) {
+		$window1->geometry($_[0]);
+		$window1->after(10, [\&resize, @_]);
+	}
 }
 
 sub vncsnapshot {
@@ -281,7 +288,9 @@ sub vncsnapshot {
 	waitpid $pid, 0;
 	$vncsnapshot = $?>>8;
 	
-	if($vncsnapshot!=0) {
+	if($vncsnapshot==0) {
+		$vncopt{'PasswordFile'} = $opt{'PasswordFile'};
+	} else {
 		my $_ = $opt{'PasswordFile'};
 		unlink $_ or warn "$_: $!";
 		$dialog3->configure( -message=>"vncsnapshot error", -detail=>"$errstr\n(exit code $vncsnapshot)" );
@@ -305,6 +314,9 @@ sub SessStart {
 		close $tmpfh;
 		$vncopt{'PasswordFile'} = $tmpfile;
 	}
+	else {
+		delete $vncopt{'PasswordFile'};
+	}
 	
 	if($_[1] eq 'vncsnapshot') {
 		my ($img, $vncsnapshot) = vncsnapshot($display, %vncopt);
@@ -321,9 +333,35 @@ sub SessStart {
 		undef $img;
 		$label2->pack( -expand=>1, -fill=>'both' );
 
-		$window2->bind('<Escape>'=>sub { $window2->destroy; });
-		$window2->bind('<q>'=>sub { $window2->destroy; });
-		$label2->bind('<Button-3>'=>[sub {
+		my $menubar2 = $label2->Menu( -tearoff=>0, -menuitems=>[
+		    	[Button=>"Refresh", -command=>[sub {
+		    		my $display = shift;
+		    		my ($img, $vncsnapshot) = vncsnapshot($display, @_);
+		    		if($vncsnapshot==0) {
+					$window2->configure( -title=>"VNC snapshot on [$display] at ".scalar(localtime) );
+					$label2->configure( -image=>$window2->Photo(-data=>encode_base64($img), -format=>'jpeg') );
+				}
+		    	}, $display, %vncopt]],
+			[Button=>"Save image", -command=>sub {
+				my $file = $window2->getSaveFile(-defaultextension=>".jpg", -initialfile=>"vncsnapshot.jpg", -title=>"Save image");
+				if(defined $file) {
+					my $img = decode_base64( $label2->cget('-image')->cget('-data') );
+					open my $imgfd, '>', $file or goto FAILED;
+					print $imgfd $img or goto FAILED;
+					close $imgfd or goto FAILED;
+					return 1;
+					FAILED:
+					$dialog2->configure( -message=>"Save file error", -detail=>$! );
+					$dialog2->Show();
+				}
+			}],
+			[Separator=>1],
+			[Button=>"Close", -command=>[\&close_toplevel, $window2]]
+		]);
+
+		$window2->bind('<Escape>' => [\&close_toplevel, $window2]);
+		$window2->bind('<q>' => [\&close_toplevel, $window2]);
+		$label2->bind('<Button-3>' => [sub {
 			my($w, $x, $y) = @_;
 			my $menubar2;
 			for($w->children) {
@@ -331,33 +369,6 @@ sub SessStart {
 					$_->unpost;
 					$menubar2 = $_;
 				}
-			}
-			if(not defined $menubar2) {
-			    $menubar2 = $w->Menu( -tearoff=>0, -menuitems=>[
-			    	[Button=>"Refresh", -command=>[sub {
-			    		my $display = shift;
-			    		my ($img, $vncsnapshot) = vncsnapshot($display, @_);
-			    		if($vncsnapshot==0) {
-						$window2->configure( -title=>"VNC snapshot on [$display] at ".scalar(localtime) );
-						$label2->configure( -image=>$window2->Photo(-data=>encode_base64($img), -format=>'jpeg') );
-					}
-			    	}, $display, %vncopt]],
-				[Button=>"Save image", -command=>sub {
-					my $file = $window2->getSaveFile(-defaultextension=>".jpg", -initialfile=>"vncsnapshot.jpg", -title=>"Save image");
-					if(defined $file) {
-						my $img = decode_base64( $label2->cget('-image')->cget('-data') );
-						open my $imgfd, '>', $file or goto FAILED;
-						print $imgfd $img or goto FAILED;
-						close $imgfd or goto FAILED;
-						return 1;
-						FAILED:
-						$dialog2->configure( -message=>"Save file error", -detail=>$! );
-						$dialog2->Show();
-					}
-				}],
-				[Separator=>1],
-				[Button=>"Close", -command=>[\&close_toplevel, $window2]]
-			    ]);
 			}
 			$menubar2->post($x, $y);
 		}, Ev('X'), Ev('Y')]);
@@ -409,14 +420,25 @@ sub SessSave {
 		$Unsaved = 0;
 	}
 }
+sub SessNew {
+	$Loaded = $str_unsaved;
+	$label1->configure( -text=>$Loaded, -foreground=>"black" );
+	$textarea1->Contents("host=\nport=\n");
+	$textarea1->SetCursor('1.5');
+	$textarea1->focus();
+}
 sub SessSel {
-	my ($index) = $listbox1->curselection();
+	my ($index) = $listbox1->curselection;
 	my $filename = $listbox1->get($index);
-	my $now = scalar gettimeofday;
-	if($Click{$filename} > $now-1.2 and $Loaded eq $filename) {
-		return SessStart($textarea1->Contents, 1);
+	if($_[0] != 3) {
+		my $now = scalar gettimeofday;
+		if($Click{$filename} > $now-1.2 and $Loaded eq $filename) {
+			return SessStart($textarea1->Contents, 1);
+		}
+		$Click{$filename} = $now;
+	} else {
+		%Click = ();
 	}
-	$Click{$filename} = $now;
 	SessLoad($filename);
 }
 sub sess_load {
@@ -473,7 +495,7 @@ sub SessRen {
 	}
 }
 sub SessDel {
-	my ($index) = $listbox1->curselection();
+	my ($index) = $listbox1->curselection;
 	return unless defined $index;
 	my $sess_name = $listbox1->get($index);
 	$dialog2->configure( -detail=>$sess_name );
@@ -488,10 +510,20 @@ sub Pref {
 }
 
 
-$window1->bind('<Escape>' => \&mori);
 $window1->bind('<Control-q>' => \&mori);
+$window1->bind('<Control-s>' => \&SessSave);
+$window1->bind('<Control-n>' => \&SessNew);
+$window1->bind('<Escape>' => sub{ $menubar3->unpost; });
+$window1->bind('<Button-1>' => sub{ $menubar3->unpost; });
 $listbox1->bind('<Button-1>' => \&SessSel);
-$listbox1->bind('<Button-3>' => \&SessDel);
+$listbox1->bind('<Button-3>' => [sub {
+	my($w, $x, $y) = @_;
+	$menubar3->unpost;
+	$w->selectionClear(0, 'end');
+	$w->selectionSet(sprintf "@%d,%d", $x-$w->rootx, $y-$w->rooty);
+	SessSel(3);
+	$menubar3->post($x, $y);
+}, Ev('X'), Ev('Y')]);
 $textarea1->bind('<<Modified>>', sub {
 	return if $textarea1_modlock;
 	$textarea1_modlock = 1;
@@ -501,7 +533,6 @@ $textarea1->bind('<<Modified>>', sub {
 	$textarea1->editModified(0);
 	$textarea1_modlock = 0;
     });
-
 $label1->bind('<Button-1>', sub {
 	return unless defined $Loaded;
 	$inputbox1->delete(0, 'end');
@@ -518,7 +549,7 @@ $listbox1->pack(qw/-side top -fill both -expand 1/);
 $adjuster1->pack(qw/-side left -fill y/);
 $frame2->pack(qw/-side bottom -fill both -expand 1/);
 $label1->pack(qw/-side top -fill x -expand 0 -pady 3 -padx 3/);
-if($Pref{'ini_editor'}) {
+if($Pref{'ini_editor'} == 1) {
 	$textarea1->pack(qw/-side right -fill both -expand 1/);
 }
 $frame3->pack(qw/-side top -fill both -expand 0/);
@@ -565,7 +596,7 @@ sub close_toplevel {
 	for($window->children) {
 		if($_->class eq 'Label') {
 			$_ = $_->cget('-text');
-			unlink $_ or warn "$_: $!";
+			defined $_ and (unlink $_ and print "del: $_\n" or warn "$_: $!");
 			last;
 		}
 	}
