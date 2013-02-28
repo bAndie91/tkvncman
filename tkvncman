@@ -19,6 +19,7 @@ $Loaded = undef;
 $Unsaved = $textarea1_modlock = $replacer_lock = 0;
 $vnchost, $vncport, $vncpass_hash, %vncopt;
 %ColourLevel = qw/rgb111 0 rgb222 1 pal8 2/;
+@PreferredEncoding = qw/JPEG Zlib ZRLE TRLE hextile raw JRLE/;
 $str_unsaved = "Unsaved Session";
 $Pref = (-f $pref_file) ? retrieve($pref_file) : {};
 %Pref = %$Pref;
@@ -63,7 +64,7 @@ if($no_watch) {
 
 $menubar1->command( -label=>"~Connect", -command=>sub{ SessStart($textarea1->Contents, 'vncviewer'); } );
 if(system("which vncsnapshot")==0) {
-	$menubar1->command( -label=>"S~napshot", -command=>sub{ SessStart($textarea1->Contents, 'vncsnapshot'); } );
+	$menubar1->command( -label=>"Sna~pshot", -command=>sub{ SessStart($textarea1->Contents, 'vncsnapshot'); } );
 } else {
 	print STDERR "No vncsnapshot installed.\n";
 }
@@ -90,8 +91,8 @@ $menubar3 = $listbox1->Menu( -tearoff=>0, -menuitems=>[
 $textarea1 = $frame2->Scrolled(
 	'Text',
 	-scrollbars=>'osoe',
-	-height=>1,
-	-width=>1,
+	-height=>'1',
+	-width=>'1',
 	-wrap=>'no',
 );
 $frame3 = $frame2->Frame(
@@ -106,7 +107,7 @@ $frame3->Entry( -textvariable=>\$vnchost,
 	-vcmd=>sub{
 		replacer('host', $_[0]);
 	}, -validate=>'key' )
-	->grid(qw/-row 0 -column 1 -sticky nw -columnspan 2/);
+	->grid(qw/-row 0 -column 1 -columnspan 3 -sticky nw/);
 
 $frame3->Label( -text=>"Port" )
 	->grid(qw/-row 1 -column 0 -sticky nw/);
@@ -117,7 +118,7 @@ $inputbox3 =
 		return replacer('port', $_) if /^\d*$/ and $_<65536;
 		return 0
 	}, -validate=>'key' )
-	->grid(qw/-row 1 -column 1 -sticky nw -columnspan 2/);
+	->grid(qw/-row 1 -column 1 -columnspan 3 -sticky nw/);
 $inputbox3->bind('<Up>'  =>  sub{$vncport<65536 and $vncport++});
 $inputbox3->bind('<Down>' => sub{$vncport>0 and $vncport--});
 
@@ -127,12 +128,12 @@ $inputbox2 = $frame3->Entry( -textvariable=>\$vncpass, -show=>'*', -width=>16,
 	-vcmd=>sub{
 		replacer('password', $_[0] eq '' ? '' : pass_enc($_[0]));
 	}, -validate=>'key' )
-	->grid(qw/-row 2 -column 1 -sticky nw/);
+	->grid(qw/-row 2 -column 1 -columnspan 2 -sticky nw/);
 $button2 = 
   $frame3->Button( -width=>16, -height=>15, 
-	-command=>sub {
+	-command=>[sub {
 		$inputbox2->configure( -show=> defined $inputbox2->cget('-show') ? undef : '*' );
-	},
+	}],
 	-image=>$frame3->Pixmap(-data=> <<EOF
 		/* XPM */
 		static char *a[] = {
@@ -158,11 +159,29 @@ $button2 =
 		"..............."
 		};
 EOF
-	))->grid(qw/-row 2 -column 2 -sticky nw/);
+	))->grid(qw/-row 2 -column 3 -sticky nw/);
 $tooltip2 = $button2->Balloon(-background=>"lightyellow");
 $tooltip2->attach($button2, -initwait=>300, -balloonposition=>'mouse', -balloonmsg=>"Show / Hide password");
 
-my $row = 2;
+$frame3->Label(-text=>"Preferred Encoding")->grid(qw/-row 3 -column 0 -columnspan 2 -sticky nw/);
+$opt_txt{'preferredencoding'} = 'auto';
+$frame3->Optionmenu(
+	-options=>[["auto", 'auto'], map {[$_, $_]} @PreferredEncoding],
+	-variable=>\$vncopt{'preferredencoding'},
+	-textvariable=>\$opt_txt{'preferredencoding'},
+	-command=>sub{
+		return unless defined $Loaded;
+		my $v = shift;
+		if($v eq 'auto') {
+			replacer('AutoSelect', 1);
+		} else {
+			replacer('Preferred_Encoding', $v);
+			replacer('AutoSelect', 0);
+		}
+	},
+    )->grid(-row=>3, -column=>2, -sticky=>'nw', -columnspan=>2);
+
+my $row = 3;
 for my $lbl (qw/FullScreen Shared ViewOnly/) {
 	$row++;
 	$frame3->Checkbutton(
@@ -175,9 +194,10 @@ for my $lbl (qw/FullScreen Shared ViewOnly/) {
 }
 
 
+
 $frame4 = $frame2->Frame();
-$button3 = 
-  $frame4->Button(-text=>"Basic <<", -command=>\&toggle_adv_bas)->pack(qw/-side bottom -anchor s -side right/);
+$frame4->Button(-textvariable=>\$button3_text, -command=>\&toggle_adv_bas)->pack(qw/-side bottom -anchor s -side right/);
+$button3_text = "Basic <<";
 
 
 $dialog1 = $window1->DialogBox( 
@@ -210,7 +230,9 @@ sub replacer {
 	my $cpos = $textarea1->index('insert') || '1.0';
 	my($ypos) = ($textarea1->yview);
 	my($xpos) = ($textarea1->xview);
-	s/^(\s*)(\Q$_[0]\E)(\s*)=.*/$1$2$3=$_[1]/mi   or  s/\n*$/\n$_[0]=$_[1]\n/;
+	my $key = $_[0];
+	$key =~ s/_/_?/g;
+	s/^(\s*)($key)(\s*)=.*/$1$2$3=$_[1]/mi   or  s/\n*$/\n$_[0]=$_[1]\n/;
 	s/\n*$/\n/;
 	$textarea1->Contents($_) if $textarea1->Contents ne $_;
 	$textarea1->SetCursor($cpos);
@@ -225,19 +247,37 @@ sub parse_textarea {
 		my ($_, $val) = (/^\s*(\S+)\s*=\s*(.*)/);
 		if(/^host$/i && $val!~/\s/) { $vnchost = $val; }
 		elsif(/^port$/i && $val=~/^\d*$/ && $val<65536) { $vncport = $val; }
-		elsif(/^Preferred_?Encoding|FullScreen|Shared|ViewOnly|MenuKey|DotWhenNoCursor|UseLocalCursor|Log|FullColou?r$/i) {
-			s/_//g;
+		elsif(/^AutoSelect|FullScreen|Shared|ViewOnly|MenuKey|DotWhenNoCursor|UseLocalCursor|Log|FullColou?r$/i) {
 			s/Colour/Color/;
 			$vncopt{lc $_} = $val;
+		}
+		elsif(/^Preferred_?Encoding$/i) {
+			s/_//g;
+			if($val =~ /^\d+$/) {
+				$val = $PreferredEncoding[$val];
+			}
+			if(grep {$val eq $_} @PreferredEncoding) {
+				$vncopt{lc $_} = $opt_txt{lc $_} = $val;
+			}
 		}
 		elsif(/^ClientCutText$/i) { $vncopt{lc 'SendClipboard'}=$opt{lc 'SendPrimary'}=$val; }
 		elsif(/^ServerCutText$/i) { $vncopt{lc 'AcceptClipboard'}=$val; }
 		elsif(/^Colou?r_?Level$/i) { $vncopt{lc 'LowColourLevel'}=$ColourLevel{$val}; }
 		elsif(/^password$/i && $val=~/^[[:xdigit:]]{16}$/i) { $vncpass_hash = $val; $vncpass = pass_dec($val); }
 	}
+	#print STDERR Dumper \%vncopt;
 	$replacer_lock = 0;
 }
-
+sub get_opts {
+	my @options;
+	for my $k (keys %vncopt) {
+		if($k eq 'preferredencoding') {
+			next unless($vncopt{'autoselect'} == 0 and grep {$vncopt{$k} eq $_} @PreferredEncoding);
+		}
+		push @options, "-$k=$vncopt{$k}";
+	}
+	return @options;
+}
 
 sub toggle_adv_bas {
 	my $w_delta;
@@ -381,7 +421,7 @@ sub SessStart {
 	else {
 		my $fork = fork;
 		if($fork==0) {
-			my @args = ('xvncviewer', $display, map {'-'.$_.'='.$vncopt{$_}} keys %vncopt);
+			my @args = ('xvncviewer', $display, get_opts());
 			local $, = ' ';
 			print @args, "\n";
 			open STDIN, '/dev/zero';
@@ -429,17 +469,18 @@ sub SessNew {
 }
 sub SessSel {
 	my ($index) = $listbox1->curselection;
-	my $filename = $listbox1->get($index);
+	my $name = $listbox1->get($index);
 	if($_[0] != 3) {
+		# DoubleClick tester
 		my $now = scalar gettimeofday;
-		if($Click{$filename} > $now-1.2 and $Loaded eq $filename) {
+		if($Click{$name} > $now-1.0 and $Loaded eq $name) {
 			return SessStart($textarea1->Contents, 1);
 		}
-		$Click{$filename} = $now;
+		$Click{$name} = $now;
 	} else {
 		%Click = ();
 	}
-	SessLoad($filename);
+	SessLoad($name);
 }
 sub sess_load {
 	$listbox1->delete(0, 'end');
@@ -523,7 +564,7 @@ $listbox1->bind('<Button-3>' => [sub {
 	$w->selectionSet(sprintf "@%d,%d", $x-$w->rootx, $y-$w->rooty);
 	SessSel(3);
 	$menubar3->post($x, $y);
-}, Ev('X'), Ev('Y')]);
+    }, Ev('X'), Ev('Y')]);
 $textarea1->bind('<<Modified>>', sub {
 	return if $textarea1_modlock;
 	$textarea1_modlock = 1;
@@ -558,9 +599,9 @@ $frame4->pack(qw/-side bottom -fill both -expand 1/);
 
 sub btn3text {
 	if(eval q{$textarea1->packInfo;1;}) {
-		$button3->configure(-text=>"Basic <<");
+		$button3_text = "Basic <<";
 	} else {
-		$button3->configure(-text=>"Advanced >>");
+		$button3_text = "Advanced >>";
 	}
 }
 btn3text();
@@ -588,7 +629,7 @@ sub mori {
 			close_toplevel($_);
 		}
 	}
-	$window1->after(10, sub{exit;});
+	$window1->destroy;
 }
 $SIG{'INT'} = $SIG{'QUIT'} = $SIG{'TERM'} = \&mori;
 sub close_toplevel {
