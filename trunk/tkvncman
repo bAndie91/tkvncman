@@ -10,18 +10,22 @@ use File::Temp qw/tempfile/;
 use IPC::Open3;
 use Symbol qw/gensym/;
 use Crypt::DES;
-use Storable;
+use XML::Simple;
+use IO::Socket::INET;
 
 $Crypter = new Crypt::DES(pack("H16", "E84AD660C4721AE0"));
-$sess_dir = $ENV{'HOME'}."/.vnc/sessions/";
-$pref_file = $ENV{'HOME'}."/.vnc/tkvncmanrc";
+$sess_dir = $ENV{'HOME'}."/.vnc/sessions";
+$pref_file = $ENV{'HOME'}."/.vnc/tkvncman.xml";
 $Loaded = undef;
+$Cwd = '';
 $Unsaved = $textarea1_modlock = $replacer_lock = 0;
 $vnchost, $vncport, $vncpass_hash, %vncopt;
-%ColourLevel = qw/rgb111 0 rgb222 1 pal8 2/;
 @PreferredEncoding = qw/JPEG Zlib ZRLE TRLE hextile raw JRLE/;
+%ColourLevel = qw/rgb111 0 rgb222 1 pal8 2 full full/;
+%ColourLevel_rev = reverse %ColourLevel;
+%ColourLevel_txt = (0=>"3 bit", 1=>"6 bit", 2=>"8 bit", 'full'=>"Full");
 $str_unsaved = "Unsaved Session";
-$Pref = (-f $pref_file) ? retrieve($pref_file) : {};
+$Pref = (-f $pref_file) ? XMLin($pref_file) : {};
 %Pref = %$Pref;
 
 
@@ -40,6 +44,17 @@ while(scalar @ARGV) {
 
 
 $window1 = new MainWindow( -title=>"tkVNCman" );
+sub mk_splash_window {
+	$splash_window = $window1->Toplevel( -title=>"Creating snapshot...");
+	$splash_window->geometry("400x100");
+	$splash_window->Label(-text=>"Creating snapshot:")->pack(-expand=>1, -fill=>'both');
+	$splash_window_label2 = $splash_window->Label()->pack(-expand=>1, -fill=>'both');
+	$splash_window->Label(-text=>"Loaded: ", -anchor=>'e')->pack(-expand=>1, -fill=>'x', -side=>'left');
+	$splash_window->Label(-textvariable=>\$splash_window_size_var, -anchor=>'w')->pack(-expand=>1, -fill=>'x', -side=>'left');
+	$splash_window->protocol('WM_DELETE_WINDOW', sub{return;});
+	$splash_window->bind('<Unmap>', sub{$splash_window->deiconify});
+	$splash_window->resizable(0, 0);
+}
 
 $frame1 = $window1->Frame();
 $adjuster1 = $window1->Adjuster( -widget=>$frame1, -side=>'left' );
@@ -49,18 +64,38 @@ $tooltip1 = $label1->Balloon(-background=>"lightyellow");
 $tooltip1->attach($label1, -initwait=>300, -balloonposition=>'mouse', -balloonmsg=>"Click to Rename");
 
 $menubar1 = $window1->Menu();
-eval q{
-	use Linux::Inotify2;
-	$watcher = new Linux::Inotify2;
-	$watcher->watch($sess_dir, IN_CREATE|IN_DELETE|IN_MODIFY|IN_MOVE, \&sess_load);
-	$watcher->blocking(0);
-	$window1->repeat(1000, sub{ $watcher->poll; });
-	1;
+
+
+		use Linux::Inotify2;
+#eval q{	use Linux::Inotify2; 1; } or $no_watch=1;
+sub add_watch {
+	if(not$no_watch) {
+		my $obj = Linux::Inotify2->new();
+		if(not defined $obj) {
+			warn "Inotify2: $!";
+			return 0;
+		}
+		push @watcher, $obj;
+		my $wref = \$watcher[$#watcher];
+		$$wref->watch($_[0], IN_CREATE|IN_DELETE|IN_MODIFY|IN_MOVE, \&sess_load);
+		$$wref->blocking(0);
+		$window1->repeat(1000, sub{ $$wref->poll; });
+	}
 }
-or $no_watch=1;
+sub add_watch_recursive {
+	add_watch($_[0]);
+	opendir my $dh, $_[0];
+	add_watch_recursive($_[0]."/".$_) for grep { -d $_[0]."/".$_ and !/^\./ } readdir $dh;
+	close $dh;
+}
 if($no_watch) {
 	$frame1->Button( -text=>"Refresh", -height=>1, -command=>\&sess_load )->pack(qw/-side bottom -fill x -expand 0/);
 }
+else {
+	add_watch_recursive($sess_dir);
+}
+
+
 
 $menubar1->command( -label=>"~Connect", -command=>sub{ SessStart($textarea1->Contents, 'vncviewer'); } );
 if(system("which vncsnapshot")==0) {
@@ -76,16 +111,43 @@ $menubar1->command( -label=>"E~xit", -foreground=>"darkred", -activebackground=>
 $window1->configure( -menu=>$menubar1 );
 
 
-$listbox1 = $frame1->Scrolled(
-	'Listbox',
+$treebox1 = $frame1->Scrolled(
+	'HList',
 	-height=>0,
-	-width=>14,
+	-width=>16,
 	-scrollbars=>'e',
 	-selectmode=>'single',
+	-separator=>'/',
+	-itemtype=>'text',
+	-browsecmd=>\&tree_click,
 );
-$menubar3 = $listbox1->Menu( -tearoff=>0, -menuitems=>[
-	[Button => "Copy", -command => sub { `cp '$sess_dir/$Loaded.vnc' '$sess_dir/Copy of $Loaded.vnc'`; }],
+$menubar3 = $treebox1->Menu( -tearoff=>0, -menuitems=>[
+	[Button => "Copy", -command => sub {
+		my $file = get_anchored_file();
+		copy($file, $file);
+	}],
 	[Button => "Delete", -command => \&SessDel],
+	[Separator=>1],
+	[Button => "Import...", -command => sub{
+		my $entry = $treebox1->info('anchor');
+		my $data = $treebox1->info( "data"=>$entry );
+		my $folder = $folder = $sess_dir."/".$entry;
+		if($data->{"file"}) {
+			$folder = $sess_dir."/".dirname($entry);
+		}
+		my $selected = $window1->getOpenFile(
+			-defaultextension=>".vnc",
+			-filetypes=>[
+				["VNC sessions", ".vnc"],
+				["All files", "*"],
+			],
+			-initialdir=>$folder,
+			-title=>"Saved VNC sessions",
+		);
+		if(-e $selected) {
+			copy($selected, $folder."/".basename($selected).".vnc");
+		}
+	}],
 ]);
 
 $textarea1 = $frame2->Scrolled(
@@ -101,16 +163,17 @@ $frame3 = $frame2->Frame(
 	-width=>'1',
 );
 
+$row = -1;
 $frame3->Label( -text=>"Host" )
-	->grid(qw/-row 0 -column 0 -sticky nw/);
+	->grid(-row=>++$row, -column=>0, -sticky=>'nw');
 $frame3->Entry( -textvariable=>\$vnchost, 
 	-vcmd=>sub{
 		replacer('host', $_[0]);
 	}, -validate=>'key' )
-	->grid(qw/-row 0 -column 1 -columnspan 3 -sticky nw/);
+	->grid(-row=>$row, -column=>1, -columnspan=>3, -sticky=>'nw');
 
 $frame3->Label( -text=>"Port" )
-	->grid(qw/-row 1 -column 0 -sticky nw/);
+	->grid(-row=>++$row, -column=>0, -sticky=>'nw');
 $inputbox3 =
   $frame3->Entry( -textvariable=>\$vncport, 
 	-vcmd=>sub{
@@ -118,17 +181,17 @@ $inputbox3 =
 		return replacer('port', $_) if /^\d*$/ and $_<65536;
 		return 0
 	}, -validate=>'key' )
-	->grid(qw/-row 1 -column 1 -columnspan 3 -sticky nw/);
+	->grid(-row=>$row, -column=>1, -columnspan=>3, -sticky=>'nw');
 $inputbox3->bind('<Up>'  =>  sub{$vncport<65536 and $vncport++});
 $inputbox3->bind('<Down>' => sub{$vncport>0 and $vncport--});
 
 $frame3->Label( -text=>"Password" )
-	->grid(qw/-row 2 -column 0 -sticky nw/);
+	->grid(-row=>++$row, -column=>0, -sticky=>'nw');
 $inputbox2 = $frame3->Entry( -textvariable=>\$vncpass, -show=>'*', -width=>16,
 	-vcmd=>sub{
 		replacer('password', $_[0] eq '' ? '' : pass_enc($_[0]));
 	}, -validate=>'key' )
-	->grid(qw/-row 2 -column 1 -columnspan 2 -sticky nw/);
+	->grid(-row=>$row, -column=>1, -columnspan=>2, -sticky=>'nw');
 $button2 = 
   $frame3->Button( -width=>16, -height=>15, 
 	-command=>[sub {
@@ -159,11 +222,11 @@ $button2 =
 		"..............."
 		};
 EOF
-	))->grid(qw/-row 2 -column 3 -sticky nw/);
+	))->grid(-row=>$row, -column=>3, -sticky=>'nw');
 $tooltip2 = $button2->Balloon(-background=>"lightyellow");
 $tooltip2->attach($button2, -initwait=>300, -balloonposition=>'mouse', -balloonmsg=>"Show / Hide password");
 
-$frame3->Label(-text=>"Preferred Encoding")->grid(qw/-row 3 -column 0 -columnspan 2 -sticky nw/);
+$frame3->Label(-text=>"Preferred Encoding")->grid(-row=>++$row, -column=>0, -columnspan=>2, -sticky=>'nw');
 $opt_txt{'preferredencoding'} = 'auto';
 $frame3->Optionmenu(
 	-options=>[["auto", 'auto'], map {[$_, $_]} @PreferredEncoding],
@@ -179,18 +242,30 @@ $frame3->Optionmenu(
 			replacer('AutoSelect', 0);
 		}
 	},
-    )->grid(-row=>3, -column=>2, -sticky=>'nw', -columnspan=>2);
+    )->grid(-row=>$row, -column=>2, -columnspan=>2, -sticky=>'nw');
 
-my $row = 3;
+$frame3->Label(-text=>"Color Depth")->grid(-row=>++$row, -column=>0, -columnspan=>2, -sticky=>'nw');
+$opt_txt{'lowcolourlevel'} = $ColourLevel_txt{1};
+$frame3->Optionmenu(
+	-options=>[["auto", 'auto'], map {[$ColourLevel_txt{$_}, $_]} sort keys %ColourLevel_txt],
+	-variable=>\$vncopt{'lowcolourlevel'},
+	-textvariable=>\$opt_txt{'lowcolourlevel'},
+	-command=>sub{
+		return unless defined $Loaded;
+		my $v = shift;
+		replacer('Color_Level', $ColourLevel_rev{$v});
+		replacer('Full_Color', $v eq 'full' ? 1 : 0);
+	},
+    )->grid(-row=>$row, -column=>2, -columnspan=>2, -sticky=>'nw');
+
 for my $lbl (qw/FullScreen Shared ViewOnly/) {
-	$row++;
 	$frame3->Checkbutton(
 		-text=>$lbl,
 		-onvalue=>1,
 		-offvalue=>0,
 		-variable=>\$vncopt{lc $lbl},
 		-command=>sub { replacer($lbl, $vncopt{lc $lbl}) },
-	)->grid(-row=>$row, -column=>0, -sticky=>'nw', -columnspan=>2);
+	)->grid(-row=>++$row, -column=>0, -sticky=>'nw', -columnspan=>2);
 }
 
 
@@ -224,15 +299,40 @@ $dialog3 = $window1->MsgBox(
 sub pass_enc { return join '', map {sprintf "%02x", ord $_} split //, $Crypter->encrypt(substr $_[0].("\x00" x 8), 0, 8); }
 sub pass_dec { return $Crypter->decrypt(join '', map {chr hex $_} grep {length} split /(..)/, $_[0]); }
 
+sub basename { return(($_[0] =~ /([^\/]+?)\.[^\.]+$/)[0]); }
+sub dirname  { return(($_[0] =~ /^(.*)\/[^\/]+$/)[0]); }
+
+sub copy {
+	my $file1 = $_[0];
+	my $file2 = $_[1];
+	my $file2_ext = '';
+	if($file2 =~ /^(.*?)(\.[^\/\.]+)$/) {
+		($file2, $file2_ext) = ($1, $2);
+	}
+	$file2 =~ s/( \((\d+)\))?$/" (".($2?$2+1:2).")"/e while(-e "$file2$file2_ext");
+	$file2 = "$file2$file2_ext";
+	open my $fh1, '<', $file1 or return 0;
+	open my $fh2, '>', $file2 or return 0;
+	print $fh2 $_ while <$fh1>;
+	close $fh2;
+	close $fh1;
+}
+
 sub replacer {
 	return 1 if $replacer_lock;
 	my $_ = $textarea1->Contents;
 	my $cpos = $textarea1->index('insert') || '1.0';
 	my($ypos) = ($textarea1->yview);
 	my($xpos) = ($textarea1->xview);
+
 	my $key = $_[0];
+	my $nkey = $key;
 	$key =~ s/_/_?/g;
-	s/^(\s*)($key)(\s*)=.*/$1$2$3=$_[1]/mi   or  s/\n*$/\n$_[0]=$_[1]\n/;
+	$key =~ s/(C)olor/$1olou?r/ig;
+	$nkey =~ s/_//g;
+	$nkey =~ s/(C)olou?r/$1olor/ig;
+
+	s/^(\s*)($key)(\s*)=.*/$1$2$3=$_[1]/mi   or  s/\n*$/\n$nkey=$_[1]\n/;
 	s/\n*$/\n/;
 	$textarea1->Contents($_) if $textarea1->Contents ne $_;
 	$textarea1->SetCursor($cpos);
@@ -247,9 +347,17 @@ sub parse_textarea {
 		my ($_, $val) = (/^\s*(\S+)\s*=\s*(.*)/);
 		if(/^host$/i && $val!~/\s/) { $vnchost = $val; }
 		elsif(/^port$/i && $val=~/^\d*$/ && $val<65536) { $vncport = $val; }
-		elsif(/^AutoSelect|FullScreen|Shared|ViewOnly|MenuKey|DotWhenNoCursor|UseLocalCursor|Log|FullColou?r$/i) {
+		elsif(/^AutoSelect|FullScreen|Shared|ViewOnly|MenuKey|DotWhenNoCursor|UseLocalCursor|Log|Full_?Colou?r$/i) {
+			s/_//g;
 			s/Colour/Color/;
 			$vncopt{lc $_} = $val;
+			if(/^Full_?Colou?r$/i and $val == 1) {
+				$opt_txt{'lowcolourlevel'} = $ColourLevel_txt{'full'};
+			}
+		}
+		elsif(/^Colou?r_?Level$/i and exists $ColourLevel{$val}) {
+			$vncopt{'lowcolourlevel'} = $ColourLevel{$val};
+			$opt_txt{'lowcolourlevel'} = $ColourLevel_txt{$vncopt{'lowcolourlevel'}};
 		}
 		elsif(/^Preferred_?Encoding$/i) {
 			s/_//g;
@@ -260,9 +368,8 @@ sub parse_textarea {
 				$vncopt{lc $_} = $opt_txt{lc $_} = $val;
 			}
 		}
-		elsif(/^ClientCutText$/i) { $vncopt{lc 'SendClipboard'}=$opt{lc 'SendPrimary'}=$val; }
-		elsif(/^ServerCutText$/i) { $vncopt{lc 'AcceptClipboard'}=$val; }
-		elsif(/^Colou?r_?Level$/i) { $vncopt{lc 'LowColourLevel'}=$ColourLevel{$val}; }
+		elsif(/^ClientCutText$/i) { $vncopt{'sendclipboard'}=$opt{'sendprimary'}=$val; }
+		elsif(/^ServerCutText$/i) { $vncopt{'acceptclipboard'}=$val; }
 		elsif(/^password$/i && $val=~/^[[:xdigit:]]{16}$/i) { $vncpass_hash = $val; $vncpass = pass_dec($val); }
 	}
 	#print STDERR Dumper \%vncopt;
@@ -273,6 +380,9 @@ sub get_opts {
 	for my $k (keys %vncopt) {
 		if($k eq 'preferredencoding') {
 			next unless($vncopt{'autoselect'} == 0 and grep {$vncopt{$k} eq $_} @PreferredEncoding);
+		}
+		if($k eq 'lowcolourlevel') {
+			next unless($vncopt{'fullcolor'} == 0  and grep {$vncopt{$k} eq $_} values %ColourLevel);
 		}
 		push @options, "-$k=$vncopt{$k}";
 	}
@@ -306,8 +416,9 @@ sub resize {
 }
 
 sub vncsnapshot {
-	my $display = shift;
-	my %opt = @_;
+	my $display = $_[0];
+	my %opt = %{$_[1]};
+	my $size_ref = $_[2];
 	my ($vncsnapshot);
 	if(not defined $opt{'PasswordFile'}) {
 		my ($tmpfh, $tmpfile) = tempfile();
@@ -323,8 +434,36 @@ sub vncsnapshot {
 	my $imgfd = gensym;
 	my $errfd = gensym;
 	my $pid = open3('/dev/zero', $imgfd, $errfd, @args);
-	$img .= $_ while <$imgfd>;
-	$errstr .= $_ while <$errfd>;
+	
+
+	@FDS = (
+		[\$imgfd, \$img],
+		[\$errfd, \$errstr],
+	);
+	CHECK_FDS:
+	my $input = '';
+	my $eof_all = 1;
+	for my $a (@FDS) {
+		vec($input, fileno(${$a->[0]}), 1) = 1;
+	}
+	my $nfound = select($input, undef, undef, 0.5);
+	$window1->update;
+	goto CHECK_FDS unless $nfound;
+	for my $a (@FDS) {
+		my $fd = ${$a->[0]};
+		if(vec($input, fileno($fd), 1) == 1) {
+			if(!eof($fd)) {
+				${$a->[1]} .= <$fd>;
+				$$size_ref = length(${$a->[1]}) . " B";
+				$eof_all = 0;
+			}
+		}
+	}
+	if(!$eof_all) {
+		goto CHECK_FDS;
+	}
+
+
 	waitpid $pid, 0;
 	$vncsnapshot = $?>>8;
 	
@@ -359,7 +498,13 @@ sub SessStart {
 	}
 	
 	if($_[1] eq 'vncsnapshot') {
-		my ($img, $vncsnapshot) = vncsnapshot($display, %vncopt);
+		mk_splash_window();
+		$splash_window_label2->configure(-text=>$display);
+		$splash_window->update;
+		
+		$splash_window_size_var = 0;
+		my ($img, $vncsnapshot) = vncsnapshot($display, \%vncopt, \$splash_window_size_var);
+		$splash_window->destroy;
 		return $vncsnapshot if $vncsnapshot != 0;
 		
 		my $window2 = $window1->Toplevel( -title=>"VNC snapshot on [$display] at ".scalar(localtime) );
@@ -375,13 +520,17 @@ sub SessStart {
 
 		my $menubar2 = $label2->Menu( -tearoff=>0, -menuitems=>[
 		    	[Button=>"Refresh", -command=>[sub {
-		    		my $display = shift;
-		    		my ($img, $vncsnapshot) = vncsnapshot($display, @_);
+		    		mk_splash_window();
+				$splash_window_label2->configure(-text=>$_[0]);
+				$splash_window->update;
+				${$_[2]} = 0;
+		    		my ($img, $vncsnapshot) = vncsnapshot(@_);
+				$splash_window->destroy;
 		    		if($vncsnapshot==0) {
-					$window2->configure( -title=>"VNC snapshot on [$display] at ".scalar(localtime) );
+					$window2->configure( -title=>"VNC snapshot on [" . $_[0] . "] at " . scalar(localtime) );
 					$label2->configure( -image=>$window2->Photo(-data=>encode_base64($img), -format=>'jpeg') );
 				}
-		    	}, $display, %vncopt]],
+		    	}, $display, \%vncopt, \$splash_window_size_var]],
 			[Button=>"Save image", -command=>sub {
 				my $file = $window2->getSaveFile(-defaultextension=>".jpg", -initialfile=>"vncsnapshot.jpg", -title=>"Save image");
 				if(defined $file) {
@@ -435,9 +584,9 @@ sub SessStart {
 sub sess_save {
 	$_[1] =~ s/\n$//;
 	$_[1] =~ s/\n/\r\n/g;
-	open F, '>', $_[0] and
-	print F $_[1] and
-	close F;
+	open my $fh, '>', $_[0] or return 0;
+	print $fh $_[1];
+	close $fh;
 }
 sub SessSave {
 	if(not defined $Loaded or $Loaded eq $str_unsaved) {
@@ -449,53 +598,152 @@ sub SessSave {
 			$display .= '::'.$vncport;
 		}
 		$inputbox1->insert(0, $display);
+		my $old_title = $dialog1->cget('-title');
+		$dialog1->configure(-title=>"Give a name");
 		$inputbox1->focus(-force);
 		if($dialog1->Show() eq "ok") {
-			$Loaded = $inputbox1->get;
+			my $name = $inputbox1->get;
+			$name =~ s/[\/\\]//g;
+			$Loaded = "$sess_dir/$Cwd/$name.vnc";
+			$Loaded =~ s/\/+/\//g;
 		}
+		$dialog1->configure(-title=>$old_title);
 	}
 	if(defined $Loaded and $Loaded ne $str_unsaved) {
-		sess_save("$sess_dir/$Loaded.vnc", $textarea1->Contents) and
+		if(!-e $Loaded) {
+			# Loaded file deleted in meantime.
+			$Loaded = $sess_dir."/".$Cwd."/".basename($Loaded).".vnc";
+		}
+		sess_save($Loaded, $textarea1->Contents) and
 		$menuitem3->configure( -foreground=>"", -activeforeground=>"" );
 		$Unsaved = 0;
 	}
 }
 sub SessNew {
 	$Loaded = $str_unsaved;
-	$label1->configure( -text=>$Loaded, -foreground=>"black" );
+	$label1->configure( -text=>$str_unsaved, -foreground=>"black" );
 	$textarea1->Contents("host=\nport=\n");
 	$textarea1->SetCursor('1.5');
 	$textarea1->focus();
 }
-sub SessSel {
-	my ($index) = $listbox1->curselection;
-	my $name = $listbox1->get($index);
-	if($_[0] != 3) {
-		# DoubleClick tester
-		my $now = scalar gettimeofday;
-		if($Click{$name} > $now-1.0 and $Loaded eq $name) {
-			return SessStart($textarea1->Contents, 1);
-		}
-		$Click{$name} = $now;
-	} else {
-		%Click = ();
-	}
-	SessLoad($name);
-}
 sub sess_load {
-	$listbox1->delete(0, 'end');
+	$treebox1->delete('all');
 	my @d = split/\/+/, $sess_dir;
 	for(1..$#d) {
 		my $d = join '/', @d[0..$_];
 		if(! -e $d) { mkdir $d; }
 	}
-	opendir DIR, $sess_dir;
-	$listbox1->insert('end', sort {$a cmp $b} map { s/\.vnc$//i; $_ } grep { -f "$sess_dir/$_" and /\.vnc$/i } readdir DIR);
-	close DIR;
+	sess_load_recursive($sess_dir, "");
+}
+sub sess_load_recursive {
+	my $dir = $_[0];
+	my $parents = $_[1] || '';
+	$parents =~ s/\/*$/\// if length $parents;
+
+	opendir my $dh, $dir;
+	for(sort {$a cmp $b} grep { -d "$dir/$_" and !/^\./ } readdir $dh) {
+		#my $label = "[$_]";
+		my $label = "$_";
+		$treebox1->add( "$parents$_", -text=>$label, -data=>{"node"=>1, "expanded"=>1} );
+		sess_load_recursive("$dir/$_", "$parents$_");
+	}
+	rewinddir $dh;
+	for my $filename (sort {$a cmp $b} grep { -f "$dir/$_" and /\.vnc$/i } readdir $dh) {
+		my $label = $filename;
+		$label =~ s/\.[^\.]+$//i;
+		$treebox1->add("$parents$filename", -text=>$label, -data=>{"leaf"=>1, "file"=>"$dir/$filename"});
+	}
+	rewinddir $dh;
+	for my $filename (sort {$a cmp $b} grep { -f "$dir/$_" and /\.lsListend$/i } readdir $dh) {
+		my $label = $filename;
+		$label =~ s/\.[^\.]+$//i;
+		$treebox1->add("$parents$filename", -text=>"$label (...)", -data=>{"dynamic"=>1, "file"=>"$dir/$filename", "expanded"=>0});
+	}
+	close $dh;
 }
 sess_load();
+sub tree_click {
+	my $entry = $_[0];
+	my $data = $treebox1->info( data=>$entry );
+	if($data->{"node"}) {
+		$Cwd = $entry;
+		my $text = $treebox1->entrycget( $entry, '-text' );
+		if($data->{"expanded"}) {
+			for my $child ($treebox1->info( children=>$entry )) {
+				$treebox1->hide( entry=>$child );
+			}
+			$text .= " (...)";
+			$data->{"expanded"} = 0;
+			$treebox1->entryconfigure( $entry, -text=>$text, -data=>$data );
+		}
+		else {
+			for my $child ($treebox1->info( children=>$entry )) {
+				$treebox1->show( entry=>$child );
+			}
+			$text =~ s/\s*\Q(...)\E$//;
+			$data->{"expanded"} = 1;
+			$treebox1->entryconfigure( $entry, -text=>$text, -data=>$data );
+		}
+	}
+	elsif($data->{"leaf"}) {
+		my $now = scalar gettimeofday;
+		my $file = $data->{"file"};
+		if($Click{$file} > $now-1.0 and $Loaded eq $file) {
+			return SessStart($textarea1->Contents, 1);
+		}
+		$Click{$file} = $now;
+		SessLoad($file);
+	}
+	elsif($data->{"dynamic"}) {
+		my $text = $treebox1->entrycget( $entry, '-text' );
+		$treebox1->delete('offsprings', $entry);
+		if($data->{"expanded"}) {
+			$text .= " (...)";
+			$data->{"expanded"} = 0;
+			$treebox1->entryconfigure( $entry, -text=>$text, -data=>$data );
+		}
+		else {
+			open my $fh, '<', $data->{"file"};
+			my($host, $port);
+			while(<$fh>) {
+				if(/^\s*lsListend_(host|port)\s*=\s*([a-z0-9_\.-]+)/i) {
+					eval "\$$1 = '$2';";
+				}
+			}
+			close $fh;
+			if(defined $host and defined $port) {
+				my $sock = IO::Socket::INET->new(
+					PeerAddr  => $host,
+					PeerPort  => $port,
+					Proto     => 'tcp',
+					Autoflush => 1,
+					timeout   => 3,
+			    	);
+				while(<$sock>) {
+					my ($tcp_port, $session_name, $session_num, $winvnc_pid) = split /\s+/;
+					if(!$treebox1->info('exists', "$entry/$session_name")) {
+						$treebox1->add("$entry/$session_name", -text=>$session_name, -data=>{"logon_session"=>1, "port"=>$tcp_port});
+					}
+				}
+				close $sock;
+			}
+			$text =~ s/\s*\Q(...)\E$//;
+			$data->{"expanded"} = 1;
+			$treebox1->entryconfigure( $entry, -text=>$text, -data=>$data );
+		}
+	}
+	elsif($data->{"logon_session"}) {
+		my($parent) = $entry =~ /^(.*?)\/[^\/]+$/;
+		my $parent_data = $treebox1->info( data=>$parent );
+		SessLoad($parent_data->{"file"});
+		replacer('port', $data->{"port"});
+	}
+}
+
 sub SessLoad {
-	$label1->configure( -text=>$_[0], -foreground=>"black" );
+	my $file = $_[0];
+	$Cwd = substr dirname($file), length "$sess_dir/";
+	$label1->configure( -text=>basename($file), -foreground=>"black" );
 #	$textarea1_modlock = $replacer_lock = 1;
 	
 	RESET_OPTS:
@@ -509,14 +757,16 @@ sub SessLoad {
 		delete $vncopt{$k};
 	}
 	$vnchost = $vncport = $vncpass = $vncpass_hash = '';
+	$opt_txt{'preferredencoding'} = 'auto';
+	$opt_txt{'lowcolourlevel'} = $ColourLevel_txt{1};
 	
 	$textarea1->Contents('');
-	open my $fh, '<', "$sess_dir/$_[0].vnc";
+	open my $fh, '<', $file;
 	s/[\r\n]+$/\n/ and $textarea1->Insert($_) while(<$fh>);
 	close $fh;
 #	parse_textarea($textarea1->Contents);
 	$textarea1->SetCursor('1.0');
-	$Loaded = $_[0];
+	$Loaded = $file;
 	
 #	$textarea1_modlock = $replacer_lock = 0;
 	$menuitem3->configure( -foreground=>'', -activeforeground=>'' );
@@ -524,30 +774,53 @@ sub SessLoad {
 }
 sub SessRen {
 	$_[1] =~ s/\x00//g;
-	$_[1] =~ s/([\/\\])/\\$1/g;
-	my $filename = "$sess_dir/$_[0].vnc";
-	if(!-e $filename or $Unsaved) {
+	$_[1] =~ s/[\/\\]//g;
+	my $filename0 = $_[0];
+	my $filename1 = "$sess_dir/$Cwd/" . $_[1] . ".vnc";
+	if(!-e $filename0 or $Unsaved) {
 		$label1->configure( -text=>$_[1], -foreground=>"black" );
-		$Loaded = $_[1];
+		$Loaded = $filename1;
 	} else {
-		rename $filename, "$sess_dir/$_[1].vnc";
-		sess_load if $no_watch;
-		SessLoad($_[1]);
+		my $success = rename $filename0, $filename1;
+		if($success) {
+			sess_load if $no_watch;
+			SessLoad($filename1);
+		}
+		else {
+			my $errstr = $!;
+			warn "rename '$filename0' to '$filename1': $errstr";
+			$dialog3->configure( -message=>"Error renaming", -detail=>"$errstr\n$filename0\n$filename1" );
+			$dialog3->Show();
+		}
 	}
 }
+sub get_anchored_file {
+	my $entry = $treebox1->info('anchor');
+	my $data = $treebox1->info( data=>$entry );
+	return $data->{"file"};
+}
 sub SessDel {
-	my ($index) = $listbox1->curselection;
-	return unless defined $index;
-	my $sess_name = $listbox1->get($index);
-	$dialog2->configure( -detail=>$sess_name );
-	if($dialog2->Show eq 'yes') {
-		unlink "$sess_dir/$sess_name.vnc";
+	my $entry = $treebox1->info('anchor');
+	my $sess_name = basename($entry);
+	my $file = get_anchored_file();
+	if(defined $file) {
+		$dialog2->configure( -detail=>$sess_name );
+		if($dialog2->Show eq 'yes') {
+			if(not unlink $file) {
+				my $errstr = $!;
+				warn "rm: $file: $errstr";
+				$dialog3->configure( -message=>"Error removing", -detail=>"$errstr\n$file" );
+				$dialog3->Show();
+			}
+		}
 	}
 }
 
 sub Pref {
 	$Pref{$_[0]} = $_[1];
-	store \%Pref, $pref_file;
+	open my $fh, '>', $pref_file;
+	print $fh XMLout(\%Pref);
+	close $fh;
 }
 
 
@@ -556,13 +829,12 @@ $window1->bind('<Control-s>' => \&SessSave);
 $window1->bind('<Control-n>' => \&SessNew);
 $window1->bind('<Escape>' => sub{ $menubar3->unpost; });
 $window1->bind('<Button-1>' => sub{ $menubar3->unpost; });
-$listbox1->bind('<Button-1>' => \&SessSel);
-$listbox1->bind('<Button-3>' => [sub {
+$treebox1->bind('<Button-3>' => [sub {
 	my($w, $x, $y) = @_;
 	$menubar3->unpost;
-	$w->selectionClear(0, 'end');
-	$w->selectionSet(sprintf "@%d,%d", $x-$w->rootx, $y-$w->rooty);
-	SessSel(3);
+	$w->selectionClear();
+	$w->anchorSet( $treebox1->nearest($y-$w->rooty) );
+	%Click = ();
 	$menubar3->post($x, $y);
     }, Ev('X'), Ev('Y')]);
 $textarea1->bind('<<Modified>>', sub {
@@ -577,7 +849,7 @@ $textarea1->bind('<<Modified>>', sub {
 $label1->bind('<Button-1>', sub {
 	return unless defined $Loaded;
 	$inputbox1->delete(0, 'end');
-	$inputbox1->insert(0, $Loaded);
+	$inputbox1->insert(0, basename($Loaded));
 	$inputbox1->focus(-force);
 	if($dialog1->Show() eq "ok") {
 		SessRen($Loaded, $inputbox1->get);
@@ -586,7 +858,7 @@ $label1->bind('<Button-1>', sub {
 
 
 $frame1->pack(qw/-side left -fill y/);
-$listbox1->pack(qw/-side top -fill both -expand 1/);
+$treebox1->pack(qw/-side top -fill both -expand 1/);
 $adjuster1->pack(qw/-side left -fill y/);
 $frame2->pack(qw/-side bottom -fill both -expand 1/);
 $label1->pack(qw/-side top -fill x -expand 0 -pady 3 -padx 3/);
@@ -637,7 +909,9 @@ sub close_toplevel {
 	for($window->children) {
 		if($_->class eq 'Label') {
 			$_ = $_->cget('-text');
-			defined $_ and (unlink $_ and print "del: $_\n" or warn "$_: $!");
+			if(-e $_) {
+				unlink $_ and print "rm: $_\n" or warn "rm: $_: $!";
+			}
 			last;
 		}
 	}
