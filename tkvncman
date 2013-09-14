@@ -63,6 +63,7 @@ sub mk_splash_window {
 	my %w;
 	$w{"window"} = $_[5]->Toplevel(-title=>$_[0]);
 	$w{"window"}->grab;
+	$w{"window"}->transient($_[5]);
 	$w{"window"}->geometry("400x100");
 	$w{"label1"} = $w{"window"}->Label(-text=>$_[1])->pack(-expand=>1, -fill=>'both');
 	$w{"label2"} = $w{"window"}->Label(-text=>$_[2])->pack(-expand=>1, -fill=>'both');
@@ -140,6 +141,7 @@ $menubar1->command(-label=>"~Options", -command=>sub{
 		
 		my $w = $window1->Toplevel(-title=>"tkVNCman options");
 		$w->grab;
+		$w->transient($window1);
 		my $f1 = $w->Frame(-borderwidth=>6)->pack(-expand=>1, -fill=>'both', -side=>'top');
 		my $f2 = $w->Frame(-borderwidth=>6)->pack(-expand=>1, -fill=>'both', -side=>'top');
 		my $f4 = $w->Frame()->pack(-expand=>0, -side=>'bottom');
