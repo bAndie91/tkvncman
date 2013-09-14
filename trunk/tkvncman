@@ -142,6 +142,7 @@ $menubar1->command(-label=>"~Options", -command=>sub{
 		$w->grab;
 		my $f1 = $w->Frame(-borderwidth=>6)->pack(-expand=>1, -fill=>'both', -side=>'top');
 		my $f2 = $w->Frame(-borderwidth=>6)->pack(-expand=>1, -fill=>'both', -side=>'top');
+		my $f4 = $w->Frame()->pack(-expand=>0, -side=>'bottom');
 		my $f3 = $w->Frame()->pack(-expand=>0, -side=>'bottom');
 		
 		$f1->Label(-text=>"Sessions directory", -anchor=>'e', -width=>$left_column_width)->pack(-expand=>0, -side=>'left');
@@ -150,26 +151,25 @@ $menubar1->command(-label=>"~Options", -command=>sub{
 			if(-d $selected) { $new_sess_dir = $selected; }
 		}, -image=>$f1->Pixmap(-data=> <<EOF
 			/* XPM */
-			static char *screenshot[] = {
-			"15 14 4 1 ",
+			static char *a[] = {
+			"15 14 3 1 ",
 			"  c gray85",
-			". c black",
-			"X c #F0FF80",
-			"o c gray100",
+			"# c black",
+			"S c #F0FF80",
 			"               ",
-			"    ....       ",
-			"   .XXXX.      ",
-			"  .XXXXXX.     ",
-			" ............. ",
-			" .XXXXXXXXXXX. ",
-			" .XXXXXXXXXXX. ",
-			" .XXXXXXXXXXX. ",
-			" .XXXXXXXXXXX. ",
-			" .XXXXXXXXXXX. ",
-			" .XXXXXXXXXXX. ",
-			" .XXXXXXXXXXX. ",
-			" ............. ",
-			"                "};
+			"    ####       ",
+			"   #SSSS#      ",
+			"  #SSSSSS#     ",
+			" ############# ",
+			" #SSSSSSSSSSS# ",
+			" #SSSSSSSSSSS# ",
+			" #SSSSSSSSSSS# ",
+			" #SSSSSSSSSSS# ",
+			" #SSSSSSSSSSS# ",
+			" #SSSSSSSSSSS# ",
+			" #SSSSSSSSSSS# ",
+			" ############# ",
+			"               "};
 EOF
 		))->pack(-side=>'right');
 		$f1->Entry(-textvariable=>\$new_sess_dir, -width=>30)->pack(-expand=>1, -fill=>'x', -side=>'right');
@@ -178,7 +178,8 @@ EOF
 		$f2->Label(-text=>"sec", -anchor=>'w')->pack(-expand=>1, -fill=>'x', -side=>'right');
 		$f2->Entry(-textvariable=>\$new_network_timeout, -width=>3)->pack(-expand=>0, -side=>'right');
 
-		$f3->Button(-text=>"Save", -command=>sub{
+		$f3->Label(-text=>"Options stored in: ".$ENV{'HOME'}."/.vnc/tkvncman.xml")->pack(-expand=>0, -side=>'top');
+		$f4->Button(-text=>"Save", -command=>sub{
 			$sess_dir = $new_sess_dir;
 			Pref('sessions_directory', $sess_dir);
 			if($no_inotify) { sess_load(); }
@@ -190,7 +191,7 @@ EOF
 			
 			$w->destroy;
 		})->pack(-side=>'left', -fill=>'x');
-		$f3->Button(-text=>"Cancel", -command=>sub{
+		$f4->Button(-text=>"Cancel", -command=>sub{
 			$w->destroy;
 		})->pack(-side=>'right', -fill=>'x');
 	});
@@ -293,23 +294,23 @@ $frame3->Button( -width=>16, -height=>15,
 		/* XPM */
 		static char *a[] = {
 		"15 17 2 1",
-		"  c #000000000",
+		"# c #000000000",
 		". c #d9dd9dd9d",
 		"...............",
 		"...............",
 		"...............",
-		"....        ...",
-		"...    .. .....",
-		"..     .. .....",
-		"..     .. .....",
-		"..     .. .....",
-		"...    .. .....",
-		"....   .. .....",
-		"...... .. .....",
-		"...... .. .....",
-		"...... .. .....",
-		"...... .. .....",
-		"...... .. .....",
+		"....########...",
+		"...####..#.....",
+		"..#####..#.....",
+		"..#####..#.....",
+		"..#####..#.....",
+		"...####..#.....",
+		"....###..#.....",
+		"......#..#.....",
+		"......#..#.....",
+		"......#..#.....",
+		"......#..#.....",
+		"......#..#.....",
 		"...............",
 		"..............."};
 EOF
@@ -588,7 +589,6 @@ sub vncsnapshot {
 
 	
 	waitpid $pid, 0;
-	print Dumper $?;
 	$vncsnapshot = $?>>8;
 	
 	if($vncsnapshot==0) {
@@ -657,7 +657,7 @@ sub SessStart {
 					$label2->configure( -image=>$_[2]->Photo(-data=>encode_base64($img), -format=>'jpeg') );
 				}
 		    	}, $display, \%vncopt, $window2]],
-			[Button=>"Save image", -command=>sub {
+			[Button=>"Save image...", -command=>sub {
 				my $file = $window2->getSaveFile(-defaultextension=>".jpg", -initialfile=>"vncsnapshot.jpg", -title=>"Save image");
 				if(defined $file) {
 					my $img = decode_base64( $label2->cget('-image')->cget('-data') );
@@ -701,6 +701,7 @@ sub SessStart {
 			print @args, "\n";
 			open STDIN, '/dev/zero';
 			exec @args;
+			exit 1;
 		}
 		else {
 			push @Forks, {'pid'=>$fork, 'file'=>$tmpfile};
@@ -760,6 +761,8 @@ sub sess_load {
 		if(! -e $d) { mkdir $d; }
 	}
 	sess_load_recursive($sess_dir, "");
+	inotify_cancel_all();
+	add_watch_recursive($sess_dir);
 }
 sub sess_load_recursive {
 	my $dir = $_[0];
@@ -770,8 +773,9 @@ sub sess_load_recursive {
 	for(sort {$a cmp $b} grep { -d "$dir/$_" and !/^\./ } readdir $dh) {
 		#my $label = "[$_]";
 		my $label = "$_";
-		$treebox1->add( "$parents$_", -text=>$label, -data=>{"node"=>1, "expanded"=>1} );
+		$treebox1->add( "$parents$_", -text=>$label, -data=>{"node"=>1, "expanded"=>1, "file"=>"$dir/$_"} );
 		sess_load_recursive("$dir/$_", "$parents$_");
+		if($Pref{"node"}->{"$parents$_"}->{"expanded"} eq 0) { node_expand(0, "$parents$_"); }
 	}
 	rewinddir $dh;
 	for my $filename (sort {$a cmp $b} grep { -f "$dir/$_" and /\.vnc$/i } readdir $dh) {
@@ -788,29 +792,40 @@ sub sess_load_recursive {
 	close $dh;
 }
 sess_load();
+sub node_expand {
+	my $xpand = shift;
+	my $entry = shift;
+	my $edata = shift || $treebox1->info( data=>$entry );
+	my $text = $treebox1->entrycget( $entry, '-text' );
+	for my $child ($treebox1->info( children=>$entry )) {
+		if($xpand) {
+			$treebox1->show( entry=>$child );
+		} else {
+			$treebox1->hide( entry=>$child );
+		}
+	}
+	if($xpand) {
+		$text =~ s/\s*\Q(*)\E$//;
+	} else {
+		$text .= " (*)";
+	}
+	$edata->{"expanded"} = $xpand;
+	$Pref{"node"}->{$entry}->{"expanded"} = $xpand;
+	$treebox1->entryconfigure( $entry, -text=>$text, -data=>$edata );
+}
 sub tree_click {
 	my $entry = $_[0];
 	$Click_last = $entry;
 	my $data = $treebox1->info( data=>$entry );
 	if($data->{"node"}) {
 		$Cwd = $entry;
-		my $text = $treebox1->entrycget( $entry, '-text' );
 		if($data->{"expanded"}) {
-			for my $child ($treebox1->info( children=>$entry )) {
-				$treebox1->hide( entry=>$child );
-			}
-			$text .= " (*)";
-			$data->{"expanded"} = 0;
-			$treebox1->entryconfigure( $entry, -text=>$text, -data=>$data );
+			node_expand(0, $entry, $data);
 		}
 		else {
-			for my $child ($treebox1->info( children=>$entry )) {
-				$treebox1->show( entry=>$child );
-			}
-			$text =~ s/\s*\Q(*)\E$//;
-			$data->{"expanded"} = 1;
-			$treebox1->entryconfigure( $entry, -text=>$text, -data=>$data );
+			node_expand(1, $entry, $data);
 		}
+		Pref_save();
 	}
 	elsif($data->{"leaf"}) {
 		# double-click handler
@@ -884,7 +899,7 @@ sub tree_click {
 						$n++;
 						my ($tcp_port, $session_name, $session_num, $winvnc_pid) = split /\s+/;
 						if(!$treebox1->info('exists', "$entry/$session_name")) {
-							$treebox1->add("$entry/$session_name", -text=>$session_name, -data=>{"logon_session"=>1, "port"=>$tcp_port});
+							$treebox1->add("$entry/$session_name", -text=>"$session_name #$session_num", -data=>{"logon_session"=>1, "port"=>$tcp_port});
 						}
 					}
 					$splash->{"window"}->update;
@@ -992,7 +1007,7 @@ sub SessDel {
 	if(defined $file) {
 		$dialog2->configure( -detail=>$sess_name );
 		if($dialog2->Show eq 'yes') {
-			if(not unlink $file) {
+			if(not ((-d $file and rmdir $file) or unlink $file)) {
 				my $errstr = $!;
 				warn "rm: $file: $errstr";
 				$dialog3->configure( -message=>"Error removing", -detail=>decode('utf8', "$errstr\n$file") );
@@ -1004,6 +1019,8 @@ sub SessDel {
 
 sub Pref {
 	$Pref{$_[0]} = $_[1];
+}
+sub Pref_save {
 	open my $fh, '>', $pref_file;
 	print $fh XMLout(\%Pref);
 	close $fh;
