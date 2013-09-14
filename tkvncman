@@ -15,22 +15,32 @@ use Socket;
 use Fcntl;
 use Errno;
 use IO::Select;
+use Encode;
 
 $Crypter = new Crypt::DES(pack("H16", "E84AD660C4721AE0"));
 $sess_dir = $ENV{'HOME'}."/.vnc/sessions";
 $pref_file = $ENV{'HOME'}."/.vnc/tkvncman.xml";
 $Loaded = undef;
 $Cwd = '';
-$Unsaved = $textarea1_modlock = $replacer_lock = $textarea1_ignore_modify = 0;
+$Unsaved = 0;
+$textarea1_modlock = 0;
+$replacer_lock = 0;
+$textarea1_ignore_modify = 0;
 $vnchost, $vncport, $vncpass_hash, %vncopt;
 @PreferredEncoding = qw/JPEG Zlib ZRLE TRLE hextile raw JRLE/;
 %ColourLevel = qw/rgb111 0 rgb222 1 pal8 2 full full/;
 %ColourLevel_rev = reverse %ColourLevel;
 %ColourLevel_txt = (0=>"3 bit", 1=>"6 bit", 2=>"8 bit", 'full'=>"Full");
 $str_unsaved = "Unsaved Session";
-$Pref = (-f $pref_file) ? XMLin($pref_file) : {};
-%Pref = %$Pref;
+$Pref_ref = (-f $pref_file) ? XMLin($pref_file) : {};
+%Pref = %$Pref_ref;
 
+if(defined $Pref{'sessions_directory'}) {
+	$sess_dir = $Pref{'sessions_directory'};
+}
+if(not defined $Pref{"Network_Timeout"}) {
+	Pref("Network_Timeout", 5);
+}
 
 
 while(scalar @ARGV) {
@@ -52,6 +62,7 @@ sub mk_splash_window {
 	# return => \{window, label1, label2, label3}
 	my %w;
 	$w{"window"} = $_[5]->Toplevel(-title=>$_[0]);
+	$w{"window"}->grab;
 	$w{"window"}->geometry("400x100");
 	$w{"label1"} = $w{"window"}->Label(-text=>$_[1])->pack(-expand=>1, -fill=>'both');
 	$w{"label2"} = $w{"window"}->Label(-text=>$_[2])->pack(-expand=>1, -fill=>'both');
@@ -73,20 +84,14 @@ $tooltip1->attach($label1, -initwait=>300, -balloonposition=>'mouse', -balloonms
 $menubar1 = $window1->Menu();
 
 
-		use Linux::Inotify2;
-#eval q{	use Linux::Inotify2; 1; } or $no_watch=1;
+eval 'use Linux::Inotify2; 1' or $no_inotify=1;
 sub add_watch {
-	if(not$no_watch) {
-		my $obj = Linux::Inotify2->new();
-		if(not defined $obj) {
-			warn "Inotify2: $!";
-			return 0;
-		}
-		push @watcher, $obj;
-		my $wref = \$watcher[$#watcher];
-		$$wref->watch($_[0], IN_CREATE|IN_DELETE|IN_MODIFY|IN_MOVE, \&sess_load);
-		$$wref->blocking(0);
-		$window1->repeat(1000, sub{ $$wref->poll; });
+	#my $watch = $Inotify->watch($_[0], IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVE, \&sess_load);
+	my $watch = $Inotify->watch($_[0], Linux::Inotify2->IN_CREATE | Linux::Inotify2->IN_DELETE | Linux::Inotify2->IN_MODIFY | Linux::Inotify2->IN_MOVE, \&sess_load);
+	if($watch) {
+		push @IWatch, $watch;
+	} else {
+		print STDERR "Inotify2: $! (", join(', ', grep { $!{$_} } keys %!), ")\n";
 	}
 }
 sub add_watch_recursive {
@@ -95,11 +100,25 @@ sub add_watch_recursive {
 	add_watch_recursive($_[0]."/".$_) for grep { -d $_[0]."/".$_ and !/^\./ } readdir $dh;
 	close $dh;
 }
-if($no_watch) {
+if(!$no_inotify) {
+	$Inotify = Linux::Inotify2->new();
+	if(not defined $Inotify) {
+		warn "Inotify2: $!";
+		$no_inotify = 1;
+	}
+	$Inotify->blocking(0);
+	$window1->repeat(1000, sub{ 
+		$Inotify->poll;
+	});
+}
+if($no_inotify) {
 	$frame1->Button( -text=>"Refresh", -height=>1, -command=>\&sess_load )->pack(qw/-side bottom -fill x -expand 0/);
 }
 else {
 	add_watch_recursive($sess_dir);
+}
+sub inotify_cancel_all {
+	$_->cancel for @IWatch;
 }
 
 
@@ -111,11 +130,72 @@ if(system("which vncsnapshot")==0) {
 	print STDERR "No vncsnapshot installed.\n";
 }
 
-$menuitem3 = $menubar1->command( -label=>"~Save", -command=>\&SessSave );
-$menubar1->command( -label=>"~New", -command=>\&SessNew );
+$menuitem3 = $menubar1->command(-label=>"~Save", -command=>\&SessSave);
+$menubar1->command(-label=>"~New", -command=>\&SessNew);
 $menubar1->separator();
-$menubar1->command( -label=>"E~xit", -foreground=>"darkred", -activebackground=>"darkred", -activeforeground=>"white", -command=>\&mori );
-$window1->configure( -menu=>$menubar1 );
+$menubar1->command(-label=>"~Options", -command=>sub{
+		my $new_sess_dir = $sess_dir;
+		my $new_network_timeout = $Pref{"Network_Timeout"};
+		my $left_column_width = 15;
+		
+		my $w = $window1->Toplevel(-title=>"tkVNCman options");
+		$w->grab;
+		my $f1 = $w->Frame(-borderwidth=>6)->pack(-expand=>1, -fill=>'both', -side=>'top');
+		my $f2 = $w->Frame(-borderwidth=>6)->pack(-expand=>1, -fill=>'both', -side=>'top');
+		my $f3 = $w->Frame()->pack(-expand=>0, -side=>'bottom');
+		
+		$f1->Label(-text=>"Sessions directory", -anchor=>'e', -width=>$left_column_width)->pack(-expand=>0, -side=>'left');
+		$f1->Button(-text=>"...", -command=>sub{
+			my $selected = $w->chooseDirectory(-initialdir=>dirname($new_sess_dir), -title=>"Select a directory!");
+			if(-d $selected) { $new_sess_dir = $selected; }
+		}, -image=>$f1->Pixmap(-data=> <<EOF
+			/* XPM */
+			static char *screenshot[] = {
+			"15 14 4 1 ",
+			"  c gray85",
+			". c black",
+			"X c #F0FF80",
+			"o c gray100",
+			"               ",
+			"    ....       ",
+			"   .XXXX.      ",
+			"  .XXXXXX.     ",
+			" ............. ",
+			" .XXXXXXXXXXX. ",
+			" .XXXXXXXXXXX. ",
+			" .XXXXXXXXXXX. ",
+			" .XXXXXXXXXXX. ",
+			" .XXXXXXXXXXX. ",
+			" .XXXXXXXXXXX. ",
+			" .XXXXXXXXXXX. ",
+			" ............. ",
+			"                "};
+EOF
+		))->pack(-side=>'right');
+		$f1->Entry(-textvariable=>\$new_sess_dir, -width=>30)->pack(-expand=>1, -fill=>'x', -side=>'right');
+
+		$f2->Label(-text=>"Network timeout", -anchor=>'e', -width=>$left_column_width)->pack(-expand=>0, -side=>'left');
+		$f2->Label(-text=>"sec", -anchor=>'w')->pack(-expand=>1, -fill=>'x', -side=>'right');
+		$f2->Entry(-textvariable=>\$new_network_timeout, -width=>3)->pack(-expand=>0, -side=>'right');
+
+		$f3->Button(-text=>"Save", -command=>sub{
+			$sess_dir = $new_sess_dir;
+			Pref('sessions_directory', $sess_dir);
+			if($no_inotify) { sess_load(); }
+			else { inotify_cancel_all(); add_watch_recursive($sess_dir); sess_load(); }
+			
+			if($new_network_timeout =~ /^\d+([\.,]\d+)?$/) {
+				Pref("Network_Timeout", $new_network_timeout);
+			}
+			
+			$w->destroy;
+		})->pack(-side=>'left', -fill=>'x');
+		$f3->Button(-text=>"Cancel", -command=>sub{
+			$w->destroy;
+		})->pack(-side=>'right', -fill=>'x');
+	});
+$menubar1->command(-label=>"E~xit", -foreground=>"darkred", -activebackground=>"darkred", -activeforeground=>"white", -command=>\&mori);
+$window1->configure(-menu=>$menubar1);
 
 
 $treebox1 = $frame1->Scrolled(
@@ -129,7 +209,7 @@ $treebox1 = $frame1->Scrolled(
 	-browsecmd=>\&tree_click,
 );
 $menubar3 = $treebox1->Menu( -tearoff=>0, -menuitems=>[
-	[Button => "Copy", -command => sub {
+	[Button => "Copy", -command => sub{
 		my $file = get_anchored_file();
 		copy($file, $file);
 	}],
@@ -138,7 +218,7 @@ $menubar3 = $treebox1->Menu( -tearoff=>0, -menuitems=>[
 	[Button => "Import...", -command => sub{
 		my $entry = $treebox1->info('anchor');
 		my $data = $treebox1->info( "data"=>$entry );
-		my $folder = $folder = $sess_dir."/".$entry;
+		my $folder = $sess_dir."/".$entry;
 		if($data->{"file"}) {
 			$folder = $sess_dir."/".dirname($entry);
 		}
@@ -231,8 +311,7 @@ $frame3->Button( -width=>16, -height=>15,
 		"...... .. .....",
 		"...... .. .....",
 		"...............",
-		"..............."
-		};
+		"..............."};
 EOF
 	))->grid(-row=>$row, -column=>3, -sticky=>'nw');
 $tooltip2 = $button2->Balloon(-background=>"lightyellow");
@@ -296,7 +375,7 @@ $button3_text = "Basic <<";
 
 $dialog1 = $window1->DialogBox( 
 	-title   => "Rename",
-	-buttons => ["ok", "cancel"] 
+	-buttons => ["Ok", "Cancel"] 
 );
 $inputbox1 = $dialog1->add('LabEntry', -width=>40)->pack();
 $dialog2 = $window1->MsgBox(
@@ -320,6 +399,8 @@ sub pass_dec { return $Crypter->decrypt(join '', map {chr hex $_} grep {length} 
 
 sub basename { return(($_[0] =~ /([^\/]+?)\.[^\.]+$/)[0]); }
 sub dirname  { return(($_[0] =~ /^(.*)\/[^\/]+$/)[0]); }
+
+sub byte_fmt { $_ = reverse shift; s/(...)/$1 /; return reverse @_; }
 
 sub copy {
 	my $file1 = $_[0];
@@ -385,7 +466,8 @@ sub parse_textarea {
 				$val = $PreferredEncoding[$val];
 			}
 			if(grep {$val eq $_} @PreferredEncoding) {
-				$vncopt{lc $_} = $opt_txt{lc $_} = $val;
+				$vncopt{lc $_} = $val;
+				$opt_txt{lc $_} = $val;
 			}
 		}
 		elsif(/^ClientCutText$/i) { $vncopt{'sendclipboard'}=$opt{'sendprimary'}=$val; }
@@ -453,29 +535,49 @@ sub vncsnapshot {
 	my($img, $errstr);
 	my $imgfd = gensym;
 	my $errfd = gensym;
-	my $pid = open3('/dev/zero', $imgfd, $errfd, @args);
+	my $pid = open3('/dev/null', $imgfd, $errfd, @args);
 	
 
 	@FDS = (
 		[\$imgfd, \$img],
 		[\$errfd, \$errstr],
 	);
+	my $start = scalar gettimeofday;
+	my $updated = $start;
+	my $bytes = 0;
+	my $size_prev = $$size_ref;
 	
 	CHECK_FDS:
+	my $now = scalar gettimeofday;
+	if($start + $Pref{"Network_Timeout"} < $now) {
+		if($bytes) {
+			$start = $now;
+			$bytes = 0;
+		} else {
+			kill 2, $pid;
+			$errstr = "Network Timeout";
+			$vncsnapshot = 254;
+			goto VNCSNAPSHOT_END;
+		}
+	}
 	my $input = '';
 	my $eof_all = 1;
 	for my $a (@FDS) {
 		vec($input, fileno(${$a->[0]}), 1) = 1;
 	}
 	my $nfound = select($input, undef, undef, 0.5);
-	$window1->update;
+	if($updated + 0.5 < $now) {
+		$window1->update;
+		$updated = $now;
+	}
 	goto CHECK_FDS unless $nfound;
 	for my $a (@FDS) {
 		my $fd = ${$a->[0]};
 		if(vec($input, fileno($fd), 1) == 1) {
 			if(!eof($fd)) {
 				${$a->[1]} .= <$fd>;
-				$$size_ref = length(${$a->[1]}) . " B";
+				$bytes = length(${$a->[1]});
+				$$size_ref = byte_fmt($bytes) . " B";
 				$eof_all = 0;
 			}
 		}
@@ -484,16 +586,19 @@ sub vncsnapshot {
 		goto CHECK_FDS;
 	}
 
-
+	
 	waitpid $pid, 0;
+	print Dumper $?;
 	$vncsnapshot = $?>>8;
 	
 	if($vncsnapshot==0) {
 		$vncopt{'PasswordFile'} = $opt{'PasswordFile'};
 	} else {
+		$errstr .= "\n(exit code $vncsnapshot)";
+		VNCSNAPSHOT_END:
 		my $_ = $opt{'PasswordFile'};
 		unlink $_ or warn "$_: $!";
-		$dialog3->configure( -message=>"vncsnapshot error", -detail=>"$errstr\n(exit code $vncsnapshot)" );
+		$dialog3->configure( -message=>"vncsnapshot error", -detail=>decode('utf8', $errstr) );
 		$dialog3->Show();
 	}
 	return($img, $vncsnapshot);
@@ -622,7 +727,7 @@ sub SessSave {
 		my $old_title = $dialog1->cget('-title');
 		$dialog1->configure(-title=>"Give a name");
 		$inputbox1->focus(-force);
-		if($dialog1->Show() eq "ok") {
+		if($dialog1->Show() eq "Ok") {
 			my $name = $inputbox1->get;
 			$name =~ s/[\/\\]//g;
 			$Loaded = "$sess_dir/$Cwd/$name.vnc";
@@ -685,6 +790,7 @@ sub sess_load_recursive {
 sess_load();
 sub tree_click {
 	my $entry = $_[0];
+	$Click_last = $entry;
 	my $data = $treebox1->info( data=>$entry );
 	if($data->{"node"}) {
 		$Cwd = $entry;
@@ -707,6 +813,7 @@ sub tree_click {
 		}
 	}
 	elsif($data->{"leaf"}) {
+		# double-click handler
 		my $now = scalar gettimeofday;
 		my $file = $data->{"file"};
 		if($Click{$file} > $now-1.0 and $Loaded eq $file) {
@@ -753,10 +860,9 @@ sub tree_click {
 				}
 				my $socket_input = IO::Select->new($socket);
 				if(!connect($socket, sockaddr_in($port, $ipa))) {
-					$errstr = $!;
 					if($!{EINPROGRESS}) {
 						while(!$socket_input->can_read(0.2)) {
-							if(scalar gettimeofday > $now + 5) {
+							if(scalar gettimeofday > $now + $Pref{"Network_Timeout"}) {
 								$dialog3->configure( -message=>"Network Timeout", -detail=>'' );
 								$dialog3->Show();
 								goto NO_SOCKET;
@@ -765,7 +871,7 @@ sub tree_click {
 						}
 					}
 					else {
-						$dialog3->configure( -message=>"Network Error", -detail=>$errstr );
+						$dialog3->configure( -message=>"Network Error", -detail=>decode('utf8', $!) );
 						$dialog3->Show();
 						goto NO_SOCKET;
 					}
@@ -784,7 +890,7 @@ sub tree_click {
 					$splash->{"window"}->update;
 				}
 				if($! ne '') {
-					$dialog3->configure( -message=>"Communication Error", -detail=>$! );
+					$dialog3->configure( -message=>"Communication Error", -detail=>decode('utf8', $!) );
 					$dialog3->Show();
 				}
 				close $socket;
@@ -799,6 +905,13 @@ sub tree_click {
 		}
 	}
 	elsif($data->{"logon_session"}) {
+		# double-click handler
+		my $now = scalar gettimeofday;
+		if($Click{$entry} > $now-1.0 and $Click_last eq $entry) {
+			return SessStart($textarea1->Contents, 1);
+		}
+		$Click{$entry} = $now;
+
 		my($parent) = $entry =~ /^(.*?)\/[^\/]+$/;
 		my $parent_data = $treebox1->info( data=>$parent );
 		SessLoad($parent_data->{"file"});
@@ -825,9 +938,13 @@ sub SessLoad {
 		}
 		delete $vncopt{$k};
 	}
-	$vnchost = $vncport = $vncpass = $vncpass_hash = '';
+	undef $vnchost;
+	undef $vncport;
+	undef $vncpass;
+	undef $vncpass_hash;
 	$opt_txt{'preferredencoding'} = 'auto';
 	$opt_txt{'lowcolourlevel'} = $ColourLevel_txt{1};
+	$inputbox2->configure(-show=>'*');
 	
 	$textarea1->Contents('');
 	open my $fh, '<', $file;
@@ -852,13 +969,13 @@ sub SessRen {
 	} else {
 		my $success = rename $filename0, $filename1;
 		if($success) {
-			sess_load if $no_watch;
+			sess_load() if $no_inotify;
 			SessLoad($filename1);
 		}
 		else {
 			my $errstr = $!;
 			warn "rename '$filename0' to '$filename1': $errstr";
-			$dialog3->configure( -message=>"Error renaming", -detail=>"$errstr\n$filename0\n$filename1" );
+			$dialog3->configure( -message=>"Error renaming", -detail=>decode('utf8', "$errstr\n$filename0\n$filename1") );
 			$dialog3->Show();
 		}
 	}
@@ -878,7 +995,7 @@ sub SessDel {
 			if(not unlink $file) {
 				my $errstr = $!;
 				warn "rm: $file: $errstr";
-				$dialog3->configure( -message=>"Error removing", -detail=>"$errstr\n$file" );
+				$dialog3->configure( -message=>"Error removing", -detail=>decode('utf8', "$errstr\n$file") );
 				$dialog3->Show();
 			}
 		}
@@ -923,7 +1040,7 @@ $label1->bind('<Button-1>', sub {
 	$inputbox1->delete(0, 'end');
 	$inputbox1->insert(0, basename($Loaded));
 	$inputbox1->focus(-force);
-	if($dialog1->Show() eq "ok") {
+	if($dialog1->Show() eq "Ok") {
 		SessRen($Loaded, $inputbox1->get);
 	}
     });
@@ -975,7 +1092,9 @@ sub mori {
 	}
 	$window1->destroy;
 }
-$SIG{'INT'} = $SIG{'QUIT'} = $SIG{'TERM'} = \&mori;
+$SIG{'INT'} = \&mori;
+$SIG{'QUIT'} = \&mori;
+$SIG{'TERM'} = \&mori;
 sub close_toplevel {
 	my $window = shift;
 	for($window->children) {
