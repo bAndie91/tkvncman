@@ -145,7 +145,7 @@ $menubar1->command(-label=>"~Options", -command=>sub{
 		my $f1 = $w->Frame(-borderwidth=>6)->pack(-expand=>1, -fill=>'both', -side=>'top');
 		my $f2 = $w->Frame(-borderwidth=>6)->pack(-expand=>1, -fill=>'both', -side=>'top');
 		my $f4 = $w->Frame()->pack(-expand=>0, -side=>'bottom');
-		my $f3 = $w->Frame()->pack(-expand=>0, -side=>'bottom');
+		my $f3 = $w->Frame()->pack(-expand=>1, -fill=>'x', -side=>'bottom');
 		
 		$f1->Label(-text=>"Sessions directory", -anchor=>'e', -width=>$left_column_width)->pack(-expand=>0, -side=>'left');
 		$f1->Button(-text=>"...", -command=>sub{
@@ -180,22 +180,25 @@ EOF
 		$f2->Label(-text=>"sec", -anchor=>'w')->pack(-expand=>1, -fill=>'x', -side=>'right');
 		$f2->Entry(-textvariable=>\$new_network_timeout, -width=>3)->pack(-expand=>0, -side=>'right');
 
-		$f3->Label(-text=>"Options stored in: ".$ENV{'HOME'}."/.vnc/tkvncman.xml")->pack(-expand=>0, -side=>'top');
+		$f3->Label(-text=>"Options stored in:", -font=>'normal 8', -anchor=>'e')->pack(-expand=>0, -side=>'left');
+		$f3->Entry(-text=>$ENV{'HOME'}."/.vnc/tkvncman.xml", -font=>'normal 8', -state=>'readonly', -relief=>'flat')->pack(-expand=>1, -fill=>'x', -side=>'right');
 		$f4->Button(-text=>"Save", -command=>sub{
 			$sess_dir = $new_sess_dir;
 			Pref('sessions_directory', $sess_dir);
 			if($no_inotify) { sess_load(); }
 			else { inotify_cancel_all(); add_watch_recursive($sess_dir); sess_load(); }
 			
-			if($new_network_timeout =~ /^\d+([\.,]\d+)?$/) {
+			if($new_network_timeout =~ /^\d+([\.]\d+)?$/) {
 				Pref("Network_Timeout", $new_network_timeout);
 			}
 			
 			$w->destroy;
-		})->pack(-side=>'left', -fill=>'x');
+		})->pack(-side=>'left', -fill=>'x')->focus;
 		$f4->Button(-text=>"Cancel", -command=>sub{
 			$w->destroy;
 		})->pack(-side=>'right', -fill=>'x');
+
+		$w->bind('<Escape>' => sub{ $w->destroy; });
 	});
 $menubar1->command(-label=>"E~xit", -foreground=>"darkred", -activebackground=>"darkred", -activeforeground=>"white", -command=>\&mori);
 $window1->configure(-menu=>$menubar1);
@@ -282,11 +285,14 @@ $inputbox3->bind('<Down>' => sub{$vncport>0 and $vncport--});
 $frame3->Label(	-text=>"Password" )->grid(-row=>++$row, -column=>0, -sticky=>'nw');
 $inputbox2 = $frame3->Entry( -textvariable=>\$vncpass, -show=>'*', -width=>16,
 		-vcmd=>sub{
+			if(length($_[0]) > 8) {	$lbl_vncpass_info->grid(@lbl_vncpass_info_grid_opts); }
+			else {			$lbl_vncpass_info->gridForget; }
 			replacer('password', $_[0] eq '' ? '' : pass_enc($_[0]));
 			return 1;
 		},
-		-validate=>'key'
+		-validate=>'key',
 	)->grid(-row=>$row, -column=>1, -columnspan=>2, -sticky=>'nw');
+$inputbox2->bind('<FocusOut>', sub{ $lbl_vncpass_info->gridForget; });
 $button2 = 
 $frame3->Button( -width=>16, -height=>15, 
 	-command=>[sub {
@@ -320,11 +326,16 @@ EOF
 $tooltip2 = $button2->Balloon(-background=>"lightyellow");
 $tooltip2->attach($button2, -initwait=>300, -balloonposition=>'mouse', -balloonmsg=>"Show / Hide password");
 
+$lbl_vncpass_info = $frame3->Label( -text=>"Passwords longer than 8 chars\nare ineffective.", -background=>"lightyellow", -font=>'normal 8', -pady=>4 );
+@lbl_vncpass_info_grid_opts = (-row=>++$row, -column=>0, -columnspan=>4);
+
 # WORKAROUND FIXME
 $window1->repeat(1000, sub {
-	$inputbox2->configure(-validate=>'key');
-	$inputbox3->configure(-validate=>'key');
-	$inputbox4->configure(-validate=>'key');
+	for my $entry ($inputbox2, $inputbox3, $inputbox4) {
+		if($entry->cget('-validate') ne 'key') {
+			$entry->configure(-validate=>'key');
+		}
+	}
 });
 
 $frame3->Label(-text=>"Preferred Encoding")->grid(-row=>++$row, -column=>0, -columnspan=>2, -sticky=>'nw');
@@ -397,13 +408,14 @@ $dialog3 = $window1->MsgBox(
 
 
 
+
 sub pass_enc { return join '', map {sprintf "%02x", ord $_} split //, $Crypter->encrypt(substr $_[0].("\x00" x 8), 0, 8); }
 sub pass_dec { return $Crypter->decrypt(join '', map {chr hex $_} grep {length} split /(..)/, $_[0]); }
 
 sub basename { return(($_[0] =~ /([^\/]+?)\.[^\.]+$/)[0]); }
 sub dirname  { return(($_[0] =~ /^(.*)\/[^\/]+$/)[0]); }
 
-sub byte_fmt { $_ = reverse shift; s/(...)/$1 /; return reverse @_; }
+sub byte_fmt { $_ = reverse shift; s/(...)/$1 /g; return reverse @_; }
 
 sub copy {
 	my $file1 = $_[0];
@@ -437,7 +449,9 @@ sub replacer {
 
 	s/^(\s*)($key)(\s*)=.*/$1$2$3=$_[1]/mi   or  s/\n*$/\n$nkey=$_[1]\n/;
 	s/\n*$/\n/;
+	$parse_textarea_ignore = 1;
 	$textarea1->Contents($_) if $textarea1->Contents ne $_;
+	$parse_textarea_ignore = 0;
 	$textarea1->SetCursor($cpos);
 	$textarea1->yviewMoveto($ypos);
 	$textarea1->xviewMoveto($xpos);
@@ -496,7 +510,7 @@ sub get_opts {
 
 sub toggle_adv_bas {
 	my $w_delta;
-	if(eval q{$textarea1->packInfo;1;}) {
+	if(eval '$textarea1->packInfo; 1') {
 		$w_delta = $textarea1->width;
 		$w_delta = -($w_delta<=1 ? 220 : $w_delta);
 		$textarea1->packForget;
@@ -558,6 +572,7 @@ sub vncsnapshot {
 			$bytes = 0;
 		} else {
 			kill 2, $pid;
+			waitpid $pid, 0;
 			$errstr = "Network Timeout";
 			$vncsnapshot = 254;
 			goto VNCSNAPSHOT_END;
@@ -592,15 +607,16 @@ sub vncsnapshot {
 	
 	waitpid $pid, 0;
 	$vncsnapshot = $?>>8;
+	$errstr .= "\n(exit code $vncsnapshot)";
 	
+	VNCSNAPSHOT_END:
 	if($vncsnapshot==0) {
 		$vncopt{'PasswordFile'} = $opt{'PasswordFile'};
 	} else {
-		$errstr .= "\n(exit code $vncsnapshot)";
-		VNCSNAPSHOT_END:
 		my $_ = $opt{'PasswordFile'};
 		unlink $_ or warn "$_: $!";
 		$dialog3->configure( -message=>"vncsnapshot error", -detail=>decode('utf8', $errstr) );
+		$dialog3->transient($window1);
 		$dialog3->Show();
 	}
 	return($img, $vncsnapshot);
@@ -669,6 +685,7 @@ sub SessStart {
 					return 1;
 					FAILED:
 					$dialog2->configure( -message=>"Save file error", -detail=>$! );
+					$dialog2->transient($window1);
 					$dialog2->Show();
 				}
 			}],
@@ -718,18 +735,22 @@ sub sess_save {
 	close $fh;
 }
 sub SessSave {
-	if(not defined $Loaded or $Loaded eq $str_unsaved) {
+#	if(not defined $Loaded or $Loaded eq $str_unsaved)
+	if(not defined $Loaded)
+	{
 		$inputbox1->delete(0, 'end');
 		my $display = $vnchost;
 		if($vncport>=5900 && $vncport<=5950) {
 			$display .= ':'.($vncport-5900);
-		} else {
+		}
+		elsif($vncport ne '') {
 			$display .= '::'.$vncport;
 		}
 		$inputbox1->insert(0, $display);
 		my $old_title = $dialog1->cget('-title');
-		$dialog1->configure(-title=>"Give a name");
+		$dialog1->configure(-title=>"Enter a name!");
 		$inputbox1->focus(-force);
+		$dialog1->transient($window1);
 		if($dialog1->Show() eq "Ok") {
 			my $name = $inputbox1->get;
 			$name =~ s/[\/\\]//g;
@@ -738,7 +759,9 @@ sub SessSave {
 		}
 		$dialog1->configure(-title=>$old_title);
 	}
-	if(defined $Loaded and $Loaded ne $str_unsaved) {
+#	if(defined $Loaded and $Loaded ne $str_unsaved)
+	if(defined $Loaded)
+	{
 		if(!-e $Loaded) {
 			# Loaded file deleted in meantime.
 			$Loaded = $sess_dir."/".$Cwd."/".basename($Loaded).".vnc";
@@ -749,7 +772,9 @@ sub SessSave {
 	}
 }
 sub SessNew {
-	$Loaded = $str_unsaved;
+	#$Loaded = $str_unsaved;
+	undef $Loaded;
+	$vncpass = '';
 	$label1->configure( -text=>$str_unsaved, -foreground=>"black" );
 	$textarea1->Contents("host=\nport=\n");
 	$textarea1->SetCursor('1.5');
@@ -872,6 +897,7 @@ sub tree_click {
 				$ipa = inet_aton $host;
 				if(not defined $ipa) {
 					$dialog3->configure( -message=>"Host not found", -detail=>$host );
+					$dialog3->transient($window1);
 					$dialog3->Show();
 					goto NO_SOCKET;
 				}
@@ -881,6 +907,7 @@ sub tree_click {
 						while(!$socket_input->can_read(0.2)) {
 							if(scalar gettimeofday > $now + $Pref{"Network_Timeout"}) {
 								$dialog3->configure( -message=>"Network Timeout", -detail=>'' );
+								$dialog3->transient($window1);
 								$dialog3->Show();
 								goto NO_SOCKET;
 							}
@@ -889,6 +916,7 @@ sub tree_click {
 					}
 					else {
 						$dialog3->configure( -message=>"Network Error", -detail=>decode('utf8', $!) );
+						$dialog3->transient($window1);
 						$dialog3->Show();
 						goto NO_SOCKET;
 					}
@@ -908,6 +936,7 @@ sub tree_click {
 				}
 				if($! ne '') {
 					$dialog3->configure( -message=>"Communication Error", -detail=>decode('utf8', $!) );
+					$dialog3->transient($window1);
 					$dialog3->Show();
 				}
 				close $socket;
@@ -934,7 +963,10 @@ sub tree_click {
 		SessLoad($parent_data->{"file"});
 		$textarea1_ignore_modify = 1;
 		$_ = $data->{"port"};
-		replacer('port', $_) if /^\d*$/ and $_<65536;
+		if(/^\d*$/ and $_<65536) {
+			replacer('port', $_);
+			$vncport = $_;
+		}
 		$textarea1_ignore_modify = 0;
 	}
 }
@@ -993,6 +1025,7 @@ sub SessRen {
 			my $errstr = $!;
 			warn "rename '$filename0' to '$filename1': $errstr";
 			$dialog3->configure( -message=>"Error renaming", -detail=>decode('utf8', "$errstr\n$filename0\n$filename1") );
+			$dialog3->transient($window1);
 			$dialog3->Show();
 		}
 	}
@@ -1013,6 +1046,7 @@ sub SessDel {
 				my $errstr = $!;
 				warn "rm: $file: $errstr";
 				$dialog3->configure( -message=>"Error removing", -detail=>decode('utf8', "$errstr\n$file") );
+				$dialog3->transient($window1);
 				$dialog3->Show();
 			}
 		}
@@ -1021,6 +1055,7 @@ sub SessDel {
 
 sub Pref {
 	$Pref{$_[0]} = $_[1];
+	Pref_save();
 }
 sub Pref_save {
 	open my $fh, '>', $pref_file;
@@ -1042,23 +1077,27 @@ $treebox1->bind('<Button-3>' => [sub {
 	%Click = ();
 	$menubar3->post($x, $y);
     }, Ev('X'), Ev('Y')]);
-$textarea1->bind('<<Modified>>', sub {
-	return if $textarea1_modlock;
+$textarea1->bind('<<Modified>>', sub{
+	return 1 if $textarea1_modlock;
 	$textarea1_modlock = 1;
 	if(!$textarea1_ignore_modify) {
 		$menuitem3->configure( -foreground=>"blue", -activeforeground=>"blue" );
 		$Unsaved = 1;
 	}
-	#$textarea1->after(100, sub{ parse_textarea($textarea1->Contents) });
 	$textarea1->editModified(0);
 	$textarea1_modlock = 0;
-	parse_textarea($textarea1->Contents);
+	# WORKAROUND FIXME
+	#$textarea1->after(100, sub{ parse_textarea($textarea1->Contents) });
+	if(!$parse_textarea_ignore) {
+		parse_textarea($textarea1->Contents);
+	}
     });
 $label1->bind('<Button-1>', sub {
 	return unless defined $Loaded;
 	$inputbox1->delete(0, 'end');
 	$inputbox1->insert(0, basename($Loaded));
 	$inputbox1->focus(-force);
+	$dialog1->transient($window1);
 	if($dialog1->Show() eq "Ok") {
 		SessRen($Loaded, $inputbox1->get);
 	}
@@ -1078,7 +1117,7 @@ $frame4->pack(qw/-side bottom -fill both -expand 1/);
 
 
 sub btn3text {
-	if(eval q{$textarea1->packInfo;1;}) {
+	if(eval '$textarea1->packInfo; 1') {
 		$button3_text = "Basic <<";
 	} else {
 		$button3_text = "Advanced >>";
