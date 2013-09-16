@@ -142,7 +142,7 @@ $menubar1->command(-label=>"~Options", -command=>sub{
 		my $f1 = $w->Frame(-borderwidth=>6)->pack(-expand=>1, -fill=>'both', -side=>'top');
 		my $f2 = $w->Frame(-borderwidth=>6)->pack(-expand=>1, -fill=>'both', -side=>'top');
 		my $f4 = $w->Frame()->pack(-expand=>0, -side=>'bottom');
-		my $f3 = $w->Frame()->pack(-expand=>1, -fill=>'x', -side=>'bottom');
+		my $f3 = $w->Frame(-borderwidth=>6)->pack(-expand=>1, -fill=>'x', -side=>'bottom');
 		
 		$f1->Label(-text=>"Sessions directory", -anchor=>'e', -width=>$left_column_width)->pack(-expand=>0, -side=>'left');
 		$f1->Button(-text=>"...", -command=>sub{
@@ -761,7 +761,7 @@ sub SessSave {
 	{
 		if(!-e $Loaded) {
 			# Loaded file deleted in meantime.
-			$Loaded = $sess_dir."/".$Cwd."/".basename($Loaded).".vnc";
+			$Loaded = $sess_dir."/".$Cwd."/".basename($Loaded).".".($textarea1->Contents =~ /^\s*lslistend/mi ? "lsListend" : "vnc");
 		}
 		sess_save($Loaded, $textarea1->Contents) and
 		$menuitem3->configure( -foreground=>"", -activeforeground=>"" );
@@ -804,7 +804,7 @@ sub sess_load_recursive {
 		if($Pref{"node"}->{"$parents$_"}->{"expanded"} eq 0) { node_expand(0, "$parents$_"); }
 	}
 	rewinddir $dh;
-	for my $filename (sort {$a cmp $b} grep { -f "$dir/$_" and /\.vnc$/i } readdir $dh) {
+	for my $filename (sort {$a cmp $b} grep { -f "$dir/$_" and /^[^\.].*\.vnc$/i } readdir $dh) {
 		my $label = $filename;
 		$label =~ s/\.[^\.]+$//i;
 		$treebox1->add("$parents$filename", -text=>$label, -data=>{"leaf"=>1, "file"=>"$dir/$filename"});
@@ -889,6 +889,7 @@ sub tree_click {
 			if(defined $host and defined $port) {
 				my ($socket, $flags, $ipa, $errstr);
 			    	my $now = scalar gettimeofday;
+			    	my $no_expand = 0;
 
 				socket($socket, PF_INET, SOCK_STREAM, getprotobyname($proto));
 				$flags = fcntl($socket, F_GETFL, $flags);
@@ -934,16 +935,19 @@ sub tree_click {
 					$splash->{"window"}->update;
 				}
 				if($! ne '') {
+					$no_expand = 1 if $!{'ECONNREFUSED'}+$!{'EHOSTUNREACH'};
+					# print STDERR "(", join(', ', grep { $!{$_} } keys %!), ")\n";
 					$dialog3->configure( -message=>"Communication Error", -detail=>decode('utf8', $!) );
 					$dialog3->transient($window1);
 					$dialog3->Show();
 				}
 				close $socket;
 				
-				$text =~ s/\s*\Q(*)\E$//;
-				$data->{"expanded"} = 1;
-				$treebox1->entryconfigure( $entry, -text=>$text, -data=>$data );
-				
+				if(!$no_expand) {
+					$text =~ s/\s*\Q(*)\E$//;
+					$data->{"expanded"} = 1;
+					$treebox1->entryconfigure( $entry, -text=>$text, -data=>$data );
+				}
 				NO_SOCKET:
 			}
 			$splash->{"window"}->destroy;
@@ -1010,11 +1014,13 @@ sub SessRen {
 	$_[1] =~ s/\x00//g;
 	$_[1] =~ s/[\/\\]//g;
 	my $filename0 = $_[0];
-	my $filename1 = "$sess_dir/$Cwd/" . $_[1] . ".vnc";
+	my($ext) = $filename0 =~ /([^\.]+)$/;
+	my $filename1 = "$sess_dir/$Cwd/" . $_[1] . "." . $ext;
 	if(!-e $filename0 or $Unsaved) {
 		$label1->configure( -text=>$_[1], -foreground=>"black" );
 		$Loaded = $filename1;
-	} else {
+	}
+	else {
 		my $success = rename $filename0, $filename1;
 		if($success) {
 			sess_load() if $no_inotify;
@@ -1138,6 +1144,9 @@ sub bury {
 };
 $SIG{'CHLD'} = \&bury;
 sub mori {
+	$Pref{"size"}->{"frame1"}->{"width"} = $frame1->width;
+	Pref_save();
+	
 	for(@Forks) {
 		$_ = $_->{'file'};
 		defined $_ and (unlink $_ or warn "$_: $!");
@@ -1162,6 +1171,12 @@ sub close_toplevel {
 		}
 	}
 	$window->destroy;
+}
+
+
+$window1->update;
+if(defined $Pref{"size"}->{"frame1"}->{"width"}) {
+	$frame1->configure( -width => $Pref{"size"}->{"frame1"}->{"width"} );
 }
 
 
