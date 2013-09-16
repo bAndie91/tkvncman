@@ -101,6 +101,9 @@ sub add_watch_recursive {
 	add_watch_recursive($_[0]."/".$_) for grep { -d $_[0]."/".$_ and !/^\./ } readdir $dh;
 	close $dh;
 }
+sub inotify_cancel_all {
+       $_->cancel for @IWatch;
+}
 if(!$no_inotify) {
 	$Inotify = Linux::Inotify2->new();
 	if(not defined $Inotify) {
@@ -114,12 +117,6 @@ if(!$no_inotify) {
 }
 if($no_inotify) {
 	$frame1->Button( -text=>"Refresh", -height=>1, -command=>\&sess_load )->pack(qw/-side bottom -fill x -expand 0/);
-}
-else {
-	add_watch_recursive($sess_dir);
-}
-sub inotify_cancel_all {
-	$_->cancel for @IWatch;
 }
 
 
@@ -788,8 +785,10 @@ sub sess_load {
 		if(! -e $d) { mkdir $d; }
 	}
 	sess_load_recursive($sess_dir, "");
-	inotify_cancel_all();
-	add_watch_recursive($sess_dir);
+	if(!$no_inotify) {
+		inotify_cancel_all();
+		add_watch_recursive($sess_dir);
+	}
 }
 sub sess_load_recursive {
 	my $dir = $_[0];
