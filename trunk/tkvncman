@@ -508,27 +508,20 @@ sub get_opts {
 sub toggle_adv_bas {
 	my $w_delta;
 	if(eval '$textarea1->packInfo; 1') {
-		$w_delta = $textarea1->width;
-		$w_delta = -($w_delta<=1 ? 220 : $w_delta);
+		$w_delta = -$textarea1->width;
 		$textarea1->packForget;
 		Pref('ini_editor', 0);
 	}
 	else {
-		$w_delta = $textarea1_width<=1 ? 220 : $textarea1_width;
 		$textarea1->pack(qw/-side right -fill both -expand 1 -after/, $label1);
+		$w_delta = $textarea1->width;
+		if($w_delta <= 1) {	$w_delta = 220; }
 		Pref('ini_editor', 1);
 	}
 	my $geometry = $window1->geometry;
 	$geometry =~ s/(\d+)/$1+$w_delta/e;
-	resize($geometry);
+	$window1->geometry($geometry);
 	btn3text();
-}
-sub resize {
-	# damn workaround
-	if($window1->geometry ne $_[0]) {
-		$window1->geometry($_[0]);
-		$window1->after(10, [\&resize, @_]);
-	}
 }
 
 sub vncsnapshot {
