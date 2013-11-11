@@ -247,6 +247,7 @@ $textarea1 = $frame2->Scrolled(
 	-width=>'1',
 	-wrap=>'no',
 );
+$textarea1->tagConfigure("bold", -foreground=>"navy");
 $frame3 = $frame2->Frame(
 	-relief=>'sunken',
 	-height=>'1',
@@ -505,6 +506,19 @@ sub get_opts {
 	return @options;
 }
 
+sub is_lsListend_sessfile {
+	my $is = 0;
+	open my $fh, '<', $_[0];
+	while(<$fh>) {
+		if(/^\s*lsListend/i) {
+			$is = 1;
+			last;
+		}
+	}
+	close $fh;
+	return $is;
+}
+
 sub toggle_adv_bas {
 	my $w_delta;
 	if(eval '$textarea1->packInfo; 1') {
@@ -754,7 +768,8 @@ sub SessSave {
 	{
 		if(!-e $Loaded) {
 			# Loaded file deleted in meantime.
-			$Loaded = $sess_dir."/".$Cwd."/".basename($Loaded).".".($textarea1->Contents =~ /^\s*lslistend/mi ? "lsListend" : "vnc");
+			#$Loaded = $sess_dir."/".$Cwd."/".basename($Loaded).".".($textarea1->Contents =~ /^\s*lslistend/mi ? "lsListend" : "vnc");
+			$Loaded = $sess_dir."/".$Cwd."/".basename($Loaded).".vnc";
 		}
 		sess_save($Loaded, $textarea1->Contents) and
 		$menuitem3->configure( -foreground=>"", -activeforeground=>"" );
@@ -797,16 +812,15 @@ sub sess_load_recursive {
 		if($Pref{"node"}->{"$parents$_"}->{"expanded"} eq 0) { node_expand(0, "$parents$_"); }
 	}
 	rewinddir $dh;
-	for my $filename (sort {$a cmp $b} grep { -f "$dir/$_" and /^[^\.].*\.vnc$/i } readdir $dh) {
+	for my $filename (sort {lc $a cmp lc $b} grep { -f "$dir/$_" and /^[^\.].*\.vnc$/i } readdir $dh) {
 		my $label = $filename;
 		$label =~ s/\.[^\.]+$//i;
-		$treebox1->add("$parents$filename", -text=>$label, -data=>{"leaf"=>1, "file"=>"$dir/$filename"});
-	}
-	rewinddir $dh;
-	for my $filename (sort {$a cmp $b} grep { -f "$dir/$_" and /\.lsListend$/i } readdir $dh) {
-		my $label = $filename;
-		$label =~ s/\.[^\.]+$//i;
-		$treebox1->add("$parents$filename", -text=>"$label (*)", -data=>{"dynamic"=>1, "file"=>"$dir/$filename", "expanded"=>0});
+		if(is_lsListend_sessfile("$dir/$filename")) {
+			$treebox1->add("$parents$filename", -text=>"$label (*)", -data=>{"dynamic"=>1, "file"=>"$dir/$filename", "expanded"=>0});
+		}
+		else {
+			$treebox1->add("$parents$filename", -text=>$label, -data=>{"leaf"=>1, "file"=>"$dir/$filename"});
+		}
 	}
 	close $dh;
 }
@@ -877,7 +891,7 @@ sub tree_click {
 				}
 			}
 			close $fh;
-			my $splash = mk_splash_window("Connecting to lsListend...", "Requesting active VNC sessions from", "$proto://$host:$port", "Loaded: ", \$n, $window1);
+			my $splash = mk_splash_window("Connecting to lsListen daemon...", "Requesting active VNC sessions from", "$proto://$host:$port", "Loaded: ", \$n, $window1);
 			$splash->{"window"}->update;
 			if(defined $host and defined $port) {
 				my ($socket, $flags, $ipa, $errstr);
@@ -993,7 +1007,16 @@ sub SessLoad {
 	
 	$textarea1->Contents('');
 	open my $fh, '<', $file;
-	s/[\r\n]+$/\n/ and $textarea1->Insert($_) while(<$fh>);
+	while(<$fh>) {
+		if(s/[\r\n]+$/\n/) {
+			if(/^\s*lsListend[a-z0-9_]+/i) {
+				$textarea1->insert('end', $_, "bold");
+			}
+			else {
+				$textarea1->Insert($_);
+			}
+		}
+	}
 	close $fh;
 #	parse_textarea($textarea1->Contents);
 	$textarea1->SetCursor('1.0');
